@@ -121,6 +121,32 @@ describe('ToolRuntime.executionMode', () => {
     expect(seen).toEqual({ anything: 1 })
   })
 
+  it('marks a declared after-batch tool without changing its concurrency kind', async () => {
+    const ctx = await setup()
+    ctx.tools.register(defineContentToolFixture({
+      name: 'question',
+      description: 'deferred interaction',
+      parameters: {},
+      schedule: 'after-batch',
+      async execute() { return [] },
+    }))
+    expect(ctx.tools.executionMode(exec('question', {}))).toEqual({ kind: 'exclusive', schedule: 'after-batch' })
+  })
+
+  it('schedule never reaches the model-facing schemas() projection', async () => {
+    const ctx = await setup()
+    ctx.tools.register(defineContentToolFixture({
+      name: 'question',
+      description: 'deferred interaction',
+      parameters: {},
+      schedule: 'after-batch',
+      async execute() { return [] },
+    }))
+    const schema = ctx.tools.schemas()[0] as unknown as Record<string, unknown>
+    expect(Object.keys(schema).sort()).toEqual(['description', 'name', 'parameters'])
+    expect(schema.schedule).toBeUndefined()
+  })
+
   it('isConcurrencySafe never reaches the model-facing schemas() projection', async () => {
     const ctx = await setup()
     ctx.tools.register(defineContentToolFixture({
@@ -135,7 +161,10 @@ describe('ToolRuntime.executionMode', () => {
     expect(schema.isConcurrencySafe).toBeUndefined()
   })
 
-  it('ToolExecutionMode is the object-tagged union', () => {
-    expectTypeOf<ToolExecutionMode>().toEqualTypeOf<{ kind: 'parallel' } | { kind: 'exclusive' }>()
+  it('ToolExecutionMode carries optional scheduling metadata', () => {
+    expectTypeOf<ToolExecutionMode>().toEqualTypeOf<
+      | { kind: 'parallel'; schedule?: 'after-batch' }
+      | { kind: 'exclusive'; schedule?: 'after-batch' }
+    >()
   })
 })

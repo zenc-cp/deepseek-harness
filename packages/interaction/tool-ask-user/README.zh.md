@@ -19,7 +19,7 @@
 
 ## 职责
 
-此包是用户交互 seam 的Consumer 包。它不渲染 UI，也不了解输入的收集方式；它只将模型参数转换为 `AskUserQuestionRequest`，并把用户回答返回给 agent loop（智能体循环）。
+此包是用户交互 seam 的 Consumer 包。它不渲染 UI，也不了解输入的收集方式；它只将模型参数转换为 `AskUserQuestionRequest`，并把用户回答返回给 agent loop（智能体循环）。该工具声明了 `schedule: 'after-batch'`，因此同一条 assistant 消息还请求普通工具时，系统会先完成这些工具，再向用户显示问题。
 
 ## 模型体验
 

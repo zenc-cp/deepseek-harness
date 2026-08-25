@@ -13,7 +13,7 @@ import AgentRegistry, { assembleContextFor, type Agent } from '@deepseek-ai/dsh-
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import AgentPresets, {
-  COMPOSITION_FILE, leakedServices, livePresetMounts, mountPreset, PresetMountError, serviceForAgent,
+  COMPOSITION_FILE, diffPresetManifests, leakedServices, livePresetMounts, mountPreset, PresetMountError, serviceForAgent,
 } from '@deepseek-ai/dsh-agent-presets'
 import type { Config } from '@deepseek-ai/dsh-agent-presets'
 import type {} from '@deepseek-ai/dsh-agent-presets/types'
@@ -122,6 +122,93 @@ describe('composing an agent from a preset', () => {
     expect(alphaPrompt.sections.map(section => section.name)).not.toContain('preset:beta')
     expect(betaPrompt.sections.map(section => section.name)).toContain('preset:beta')
     expect(alphaPrompt.tools.map(schema => schema.name)).toEqual(['alpha'])
+  })
+
+  it('emits deterministic redacted manifests and precise preset diffs', async () => {
+    const alpha = await ctx.agentPresets.manifest('standard')
+    const alphaAgain = await ctx.agentPresets.manifest('standard')
+    const beta = await ctx.agentPresets.manifest('minimal')
+
+    expect(alpha).toEqual(alphaAgain)
+    expect(alpha).toMatchObject({
+      version: 1,
+      preset: { id: 'standard', trust: 'system' },
+      rows: [
+        { id: 'alpha', module: '../../plugins/contribute.js', enabled: true, config: { apiKey: '[redacted]', tool: 'alpha' } },
+        { id: 'alpha-extra', module: '../../plugins/contribute.js', enabled: false, config: { tool: 'alpha-extra' } },
+      ],
+      tools: [{ name: 'alpha', description: 'fixture tool alpha' }],
+    })
+    expect(alpha.promptSections.map(section => section.name)).toContain('preset:alpha')
+    expect(alpha.services).toEqual([])
+    expect(alpha).toMatchInlineSnapshot(`
+      {
+        "preset": {
+          "id": "standard",
+          "trust": "system",
+        },
+        "promptSections": [
+          {
+            "name": "deployment:persona",
+          },
+          {
+            "name": "harness:identity",
+          },
+          {
+            "name": "preset:alpha",
+          },
+        ],
+        "rows": [
+          {
+            "config": {
+              "apiKey": "[redacted]",
+              "tool": "alpha",
+            },
+            "enabled": true,
+            "id": "alpha",
+            "module": "../../plugins/contribute.js",
+          },
+          {
+            "config": {
+              "tool": "alpha-extra",
+            },
+            "enabled": false,
+            "id": "alpha-extra",
+            "module": "../../plugins/contribute.js",
+          },
+        ],
+        "services": [],
+        "tools": [
+          {
+            "description": "fixture tool alpha",
+            "name": "alpha",
+          },
+        ],
+        "version": 1,
+      }
+    `)
+    expect(JSON.stringify(alpha)).not.toContain(FIXTURES)
+    expect(diffPresetManifests(alpha, alpha)).toEqual({ version: 1, changes: [] })
+    expect(diffPresetManifests(
+      { ...alpha, services: ['alpha-service', 'shared-service'] },
+      { ...alpha, services: ['beta-service', 'shared-service'] },
+    ).changes).toEqual([
+      { path: 'services.alpha-service', before: { name: 'alpha-service' } },
+      { path: 'services.beta-service', after: { name: 'beta-service' } },
+    ])
+    expect(diffPresetManifests(alpha, beta)).toMatchObject({
+      version: 1,
+      changes: [
+        { path: 'preset.id', before: 'standard', after: 'minimal' },
+        { path: 'rows.alpha', before: expect.any(Object) },
+        { path: 'rows.alpha-extra', before: expect.any(Object) },
+        { path: 'rows.beta', after: expect.any(Object) },
+        { path: 'tools.alpha', before: expect.any(Object) },
+        { path: 'tools.beta', after: expect.any(Object) },
+        { path: 'promptSections.preset:alpha', before: expect.any(Object) },
+        { path: 'promptSections.preset:beta', after: expect.any(Object) },
+      ],
+    })
   })
 
   it('mounts the default preset when the caller names none', async () => {

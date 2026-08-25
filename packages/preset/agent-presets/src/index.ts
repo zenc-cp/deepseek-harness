@@ -31,9 +31,10 @@ import { settingsNamespace, type SettingsScope, type default as SettingsService 
 import { dshHomePath } from '@deepseek-ai/dsh-home-paths'
 import { discoverPresets, USER_PRESET_DIR } from './discovery.ts'
 import { copyComposition, deleteComposition, readComposition } from './authoring.ts'
-import { mountPreset, serviceForAgent, standingMountFor } from './mount.ts'
+import { livePresetMounts, mountPreset, serviceForAgent, standingMountFor } from './mount.ts'
 import { PresetExistsError } from './authoring.ts'
 import { PresetMountError, UnknownPresetError, type AgentPreset, type Config, type PresetRoot } from './preset.ts'
+import { buildPresetManifest, type PresetManifest } from './manifest.ts'
 import type {} from './types.ts'
 
 /** Settings namespace carrying the user's chosen default preset. */
@@ -65,6 +66,11 @@ export {
 export { resolveSessionPreset, type PresetBearingSession } from './session.ts'
 export { PresetMountError, UnknownPresetError } from './preset.ts'
 export type { AgentPreset, Config, PresetRoot, PresetTrust } from './preset.ts'
+export {
+  buildPresetManifest, diffPresetManifests,
+  type PresetManifest, type PresetManifestChange, type PresetManifestDiff,
+  type PresetManifestPromptSection, type PresetManifestRow, type PresetManifestTool,
+} from './manifest.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
@@ -485,6 +491,25 @@ export class AgentPresets extends Service {
   async standingKeyFor(id?: string): Promise<ScopeKey> {
     const preset = await this.resolveMountable(id)
     return (await this.ensureStanding(preset)).key
+  }
+
+  /**
+   * Inspect one resolved standing composition as deterministic, redacted data.
+   * This starts no agent, session, or turn and never exposes prompt text,
+   * absolute paths, or credential-shaped configuration values.
+   * @param id - preset id, or `undefined` for {@link defaultId}.
+   * @returns the versioned manifest of selected rows and capabilities.
+   */
+  async manifest(id?: string): Promise<PresetManifest> {
+    if (this.selfCtx.get('systemPrompt') === undefined) {
+      throw new Error('agent-presets: manifest inspection requires the systemPrompt service')
+    }
+    const preset = await this.resolveMountable(id)
+    const standing = await this.ensureStanding(preset)
+    const mount = livePresetMounts().find(candidate => candidate.key === standing.key)
+    /* v8 ignore next -- ensureStanding returns only after mountPreset records the live mount. */
+    if (mount === undefined) throw new Error(`agent-presets: mounted preset "${preset.id}" has no inspection record`)
+    return await buildPresetManifest(this.selfCtx.root, preset, standing.key, mount.tree, mount.fiber)
   }
 
   /** Resolve (or create, single-flight) the standing mount of one preset. */

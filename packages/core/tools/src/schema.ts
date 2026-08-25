@@ -505,6 +505,11 @@ export interface DefineToolOptions<S extends ParameterSchemaSpec, O extends Valu
    */
   isConcurrencySafe?(args: InferArgs<S>): boolean
   /**
+   * Defer this tool until every ordinary call from the same assistant batch has
+   * settled. Deferred tools retain their ordinary concurrency mode.
+   */
+  readonly schedule?: 'after-batch'
+  /**
    * Execute the tool after argument validation.
    * @param args - typed validated arguments.
    * @param exec - execution identity, caller, cancellation, and nesting data.
@@ -582,6 +587,7 @@ export function defineTool<const S extends ParameterSchemaSpec, const O extends 
       } : {},
     },
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
+    ...(options.schedule !== undefined ? { schedule: options.schedule } : {}),
     async execute(args: unknown, exec: ToolRunContext): Promise<JsonValue> {
       const violations = validate(args)
       if (violations.length > 0) throw new ToolArgsError(violations)

@@ -268,6 +268,12 @@ export interface ToolDefinition extends ToolSchema {
    */
   isConcurrencySafe?(args: unknown): boolean
   /**
+   * Defer this tool until every ordinary call from the same assistant batch has
+   * settled. Deferred tools retain their ordinary parallel/exclusive mode within
+   * the final phase. This metadata is never model-visible.
+   */
+  readonly schedule?: 'after-batch'
+  /**
    * Optional: how to present the PENDING state of one call in a UI, derived from
    * the call's `args` (parsed arguments, `unknown` — the tool validates/narrows
    * its own input). Returns a {@link ToolCallView} (a `card`-tagged render intent),
@@ -339,11 +345,12 @@ export interface ToolExecutionInput {
 
 /**
  * Scheduling mode for one pending call. `parallel` may overlap with siblings;
- * `exclusive` runs alone and forms an ordering barrier.
+ * `exclusive` runs alone and forms an ordering barrier. `after-batch` defers the
+ * call until ordinary calls from the same assistant step have settled.
  */
 export type ToolExecutionMode =
-  | { kind: 'parallel' }
-  | { kind: 'exclusive' }
+  | { kind: 'parallel'; schedule?: 'after-batch' }
+  | { kind: 'exclusive'; schedule?: 'after-batch' }
 
 /**
  * One settled `run_code` sub-dispatch about to be logged, as seen by the
@@ -1275,12 +1282,17 @@ export class ToolRuntime extends Service {
    */
   executionMode(exec: ToolExecutionInput): ToolExecutionMode {
     const tool = this.resolveExecution(exec.name, exec.agent, exec.parent !== undefined)
-    if (!tool?.isConcurrencySafe) return { kind: 'exclusive' }
+    const schedule = tool?.schedule
+    const mode = (kind: ToolExecutionMode['kind']): ToolExecutionMode => ({
+      kind,
+      ...schedule === 'after-batch' ? { schedule } : {},
+    })
+    if (!tool?.isConcurrencySafe) return mode('exclusive')
     try {
       const concurrencySafe: unknown = tool.isConcurrencySafe(exec.arguments)
-      return concurrencySafe === true ? { kind: 'parallel' } : { kind: 'exclusive' }
+      return mode(concurrencySafe === true ? 'parallel' : 'exclusive')
     } catch {
-      return { kind: 'exclusive' }
+      return mode('exclusive')
     }
   }
 

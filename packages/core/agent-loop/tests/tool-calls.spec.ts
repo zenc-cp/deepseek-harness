@@ -60,7 +60,7 @@ function multiCall(calls: { id: string; name: string; args: object }[]): StreamC
 }
 
 /** A tool whose calls block until the test releases them by callId. */
-function gatedTool(name: string, parallel: boolean) {
+function gatedTool(name: string, parallel: boolean, schedule?: 'after-batch') {
   const gates = new Map<string, () => void>()
   const started: string[] = []
   const tool = defineContentToolFixture({
@@ -68,6 +68,7 @@ function gatedTool(name: string, parallel: boolean) {
     description: `gated ${name}`,
     parameters: { id: { type: 'string', required: true } },
     ...parallel ? { isConcurrencySafe: () => true } : {},
+    ...schedule === undefined ? {} : { schedule },
     async execute(args) {
       started.push(args.id)
       await new Promise<void>((resolve) => { gates.set(args.id, resolve) })
@@ -112,6 +113,50 @@ describe('tool-call scheduler: grouping and barriers', () => {
     expect(gated.started).toEqual(['1', '2', '3'])
     gated.release('1'); gated.release('2'); gated.release('3')
     await waitForIdle(ctx, agent)
+  })
+
+  it('runs after-batch calls only after ordinary calls from the same assistant step settle', async () => {
+    const adapter = new MockAdapter([
+      multiCall([
+        { id: 'c1', name: 'ordinary', args: { id: '1' } },
+        { id: 'c2', name: 'deferred', args: { id: '2' } },
+        { id: 'c3', name: 'ordinary', args: { id: '3' } },
+      ]),
+      textResponse('done'),
+    ])
+    const ctx = await harness(adapter)
+    const ordinary = gatedParallelTool('ordinary')
+    const deferred = gatedTool('deferred', false, 'after-batch')
+    ctx.tools.register(ordinary.tool)
+    ctx.tools.register(deferred.tool)
+    const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await until(() => ordinary.started.length === 2)
+    await new Promise(r => setTimeout(r, 5))
+    expect(ordinary.started).toEqual(['1', '3'])
+    expect(deferred.started).toEqual([])
+    ordinary.release('1'); ordinary.release('3')
+    await until(() => deferred.started.length === 1)
+    expect(deferred.started).toEqual(['2'])
+    deferred.release('2')
+    await waitForIdle(ctx, agent)
+
+    const durableOrder = events(agent)
+      .filter(event => event.type === 'tool/call' || event.type === 'tool/result')
+      .map(event => event.type === 'tool/call'
+        ? `call:${event.data.callId}`
+        : `result:${event.data.message.source.callId}`)
+    expect(durableOrder).toMatchInlineSnapshot(`
+      [
+        "call:c1",
+        "call:c2",
+        "call:c3",
+        "result:c1",
+        "result:c2",
+        "result:c3",
+      ]
+    `)
   })
 
   it('an exclusive call between two parallel-safe calls forms a barrier (3 groups)', async () => {
@@ -457,6 +502,39 @@ describe('tool-call scheduler: ordered middleware and additional contexts', () =
 })
 
 describe('tool-call scheduler: abort handling', () => {
+  it('publishes synthetic after-batch results in model order when ordinary work aborts', async () => {
+    const adapter = new MockAdapter([
+      multiCall([
+        { id: 'c1', name: 'ordinary', args: { id: '1' } },
+        { id: 'c2', name: 'deferred', args: { id: '2' } },
+        { id: 'c3', name: 'ordinary', args: { id: '3' } },
+      ]),
+      textResponse('should never be requested'),
+    ])
+    const ctx = await harness(adapter)
+    const ordinary = gatedParallelTool('ordinary')
+    const deferred = gatedTool('deferred', false, 'after-batch')
+    ctx.tools.register(ordinary.tool)
+    ctx.tools.register(deferred.tool)
+    const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await until(() => ordinary.started.length === 2)
+    agent.cancel({ kind: 'user' })
+    ordinary.release('1'); ordinary.release('3')
+    await waitForIdle(ctx, agent)
+
+    expect(deferred.started).toEqual([])
+    expect(events(agent).filter(e => e.type === 'tool/result').map(e => ({
+      callId: e.data.message.source.callId,
+      error: e.data.error,
+    }))).toEqual([
+      { callId: CallId('c1'), error: { name: 'AbortError', code: 'ABORTED' } },
+      { callId: CallId('c2'), error: { name: 'AbortError', code: TOOL_ABORTED_BEFORE_DISPATCH } },
+      { callId: CallId('c3'), error: { name: 'AbortError', code: 'ABORTED' } },
+    ])
+  })
+
   it('starts no calls when the signal is already aborted before a parallel group', async () => {
     const adapter = new MockAdapter([
       multiCall([{ id: 'c1', name: 'p', args: { id: '1' } }, { id: 'c2', name: 'p', args: { id: '2' } }]),

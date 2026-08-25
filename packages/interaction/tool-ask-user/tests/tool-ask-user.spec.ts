@@ -73,6 +73,12 @@ describe('ask_user_question tool', () => {
     expect(parameters.properties.questions.items.properties.options.items.properties).not.toHaveProperty('value')
     expect(parameters.properties.questions.items.properties.options.items.properties).not.toHaveProperty('recommended')
     expect(parameters.properties.questions.items.properties.options.items.properties).not.toHaveProperty('preview')
+    expect(ctx.tools.executionMode({
+      signal: testToolSignal,
+      callId: CallId('ask-schedule'),
+      name: 'ask_user_question',
+      arguments: { questions: [{ id: 'continue', question: 'Continue?' }] },
+    })).toEqual({ kind: 'exclusive', schedule: 'after-batch' })
   })
 
   it('asks the registered user-questions provider and projects structured answers to text', async () => {

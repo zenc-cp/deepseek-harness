@@ -3,6 +3,7 @@
   name: ../../plugins/contribute.js
   config:
     tool: alpha
+    apiKey: fixture-secret-must-not-leak
 
 # A row switched off in the composition stays off without failing the mount.
 - id: alpha-extra

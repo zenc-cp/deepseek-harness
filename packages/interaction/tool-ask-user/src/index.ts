@@ -20,6 +20,7 @@ export function apply(ctx: Context): void {
   ctx.tools.register(defineTool({
     name: 'ask_user_question',
     description,
+    schedule: 'after-batch',
     parameters: {
       questions: {
         type: 'array',

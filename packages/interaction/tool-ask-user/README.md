@@ -19,7 +19,7 @@ The tool calls `ctx.userQuestions.ask()` and returns canonical `{ answers: [{ id
 
 ## Role
 
-This is the Consumer package for the user-questions seam. It does not render UI and does not know how input is collected; it only translates model arguments into `AskUserQuestionRequest` and returns the human answer to the agent loop.
+This is the Consumer package for the user-questions seam. It does not render UI and does not know how input is collected; it only translates model arguments into `AskUserQuestionRequest` and returns the human answer to the agent loop. The tool declares `schedule: 'after-batch'`, so when one assistant message also requests ordinary tools, their work settles before the UI asks the human.
 
 ## Model Experience
 

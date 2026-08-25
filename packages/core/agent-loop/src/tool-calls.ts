@@ -20,6 +20,8 @@ import { TOOL_ABORTED_BEFORE_DISPATCH, TOOL_RUNTIME_SCHEDULER, type ToolExecutio
 interface PlannedCall {
   block: ToolCallBlock
   exec: ToolExecutionInput
+  /** Pre-recorded in model order when scheduling must dispatch out of order. */
+  callSeq?: number
 }
 
 /** Settled dispatch awaiting model-order finalization. */
@@ -27,6 +29,13 @@ interface Slot {
   exec: ToolRunContext
   result: ToolExecutionResult
   needsPost: boolean
+}
+
+/** Finalized result waiting for durable model-order publication. */
+interface PendingCommit {
+  call: PlannedCall
+  result: ToolExecutionResult
+  callSeq: number
 }
 
 /** One scheduler group outcome, including a drained cancellation. */
@@ -78,26 +87,52 @@ export async function executeToolCalls(
       signal,
     },
   }))
+  const ordered = orderScheduledCalls(ctx, planned)
+  const reordered = ordered.some((call, index) => call !== planned[index])
+  if (reordered) {
+    // Dispatch order may differ, but the durable call projection preserves the
+    // model's tool-call order so reconstructed requests remain protocol-valid.
+    for (const call of planned) call.callSeq = appendToolCall(session, turn, step, call.block)
+  }
+  const pendingCommits = reordered ? new Map<PlannedCall, PendingCommit>() : undefined
 
   let next = 0
   let concluded = false
-  while (next < planned.length) {
+  while (next < ordered.length) {
     // Commit before classifying again so registry changes affect unstarted calls.
     // oxlint-disable-next-line typescript/no-non-null-assertion -- bounded by the loop condition
-    const first = planned[next]!
-    const mode = ctx.tools.executionMode(first.exec).kind
-    const group = mode === 'parallel' ? planned.slice(next) : [first]
+    const first = ordered[next]!
+    const firstMode = ctx.tools.executionMode(first.exec)
+    const mode = firstMode.kind
+    const tail = ordered.slice(next)
+    const boundary = mode === 'parallel'
+      ? tail.findIndex(call => ctx.tools.executionMode(call.exec).schedule !== firstMode.schedule)
+      : 1
+    const group = mode === 'parallel' && boundary < 0 ? tail : tail.slice(0, boundary)
     const outcome = await runGroup(
-      ctx, turn, step, group, mode, signal, acceptContext,
+      ctx, turn, step, group, mode, signal, acceptContext, pendingCommits,
     )
     next += outcome.consumed
     concluded ||= outcome.concluded
     if (outcome.aborted) {
-      for (const call of planned.slice(next)) appendSkippedToolCall(session, turn, step, call.block)
+      for (const call of ordered.slice(next)) recordSkippedToolCall(session, turn, step, call, pendingCommits)
+      concluded ||= publishPendingCommits(session, turn, step, planned, pendingCommits, acceptContext)
       return { concluded }
     }
   }
+  concluded ||= publishPendingCommits(session, turn, step, planned, pendingCommits, acceptContext)
   return { concluded }
+}
+
+/** Stable partition: ordinary calls first, then tools explicitly deferred to the batch tail. */
+function orderScheduledCalls(ctx: Context, planned: PlannedCall[]): PlannedCall[] {
+  const ordinary: PlannedCall[] = []
+  const afterBatch: PlannedCall[] = []
+  for (const call of planned) {
+    const target = ctx.tools.executionMode(call.exec).schedule === 'after-batch' ? afterBatch : ordinary
+    target.push(call)
+  }
+  return [...ordinary, ...afterBatch]
 }
 
 /** Parse model arguments, preserving invalid JSON as text and mapping empty input to `{}`. */
@@ -126,6 +161,7 @@ async function runGroup(
   mode: ToolExecutionMode['kind'],
   signal: AbortSignal,
   acceptContext: (context: UserMessage) => void,
+  pendingCommits?: Map<PlannedCall, PendingCommit>,
 ): Promise<GroupOutcome> {
   const { session } = ctx.agents.requireInitiator()
   const { maxParallelToolCalls } = ctx.agentLoop.config
@@ -152,9 +188,13 @@ async function runGroup(
         ? await ctx.tools[TOOL_RUNTIME_SCHEDULER].finalize(slot.exec, slot.result)
         : ctx.tools[TOOL_RUNTIME_SCHEDULER].finish(slot.exec, slot.result)
       // oxlint-disable-next-line typescript/no-non-null-assertion -- bounded index
-      appendToolResult(session, turn, step, call!.block, result, callSeqs[committed]!)
-      for (const context of result.additionalContexts ?? []) acceptContext(context)
-      concluded ||= result.concludesTurn === true
+      const pending = { call: call!, result, callSeq: callSeqs[committed]! }
+      if (pendingCommits === undefined) {
+        publishToolResult(session, turn, step, pending, acceptContext)
+        concluded ||= result.concludesTurn === true
+      } else {
+        pendingCommits.set(pending.call, pending)
+      }
       committed++
     }
   }
@@ -164,7 +204,7 @@ async function runGroup(
   const startCall = async (index: number): Promise<void> => {
     // oxlint-disable-next-line typescript/no-non-null-assertion -- bounded index
     const call = group[index]!
-    callSeqs[index] = appendToolCall(session, turn, step, call.block)
+    callSeqs[index] = call.callSeq ?? appendToolCall(session, turn, step, call.block)
     started++
     const prepared = await ctx.tools[TOOL_RUNTIME_SCHEDULER].prepare(call.exec)
     throwSchedulerFailure()
@@ -237,7 +277,7 @@ async function runGroup(
   if (aborted) {
     // Started calls and accepted context settle first; every remaining model
     // call then receives an ordered synthetic result before the turn aborts.
-    for (const call of group.slice(started)) appendSkippedToolCall(session, turn, step, call.block)
+    for (const call of group.slice(started)) recordSkippedToolCall(session, turn, step, call, pendingCommits)
     return { consumed: group.length, aborted: true, concluded }
   }
   /* v8 ignore next -- unreachable: a non-aborted group commits every started call */
@@ -245,23 +285,67 @@ async function runGroup(
   return { consumed: started, aborted: false, concluded }
 }
 
-/** Append the durable call/result pair for a model call skipped after cancellation. */
-function appendSkippedToolCall(session: Session, turn: number, step: number, block: ToolCallBlock): void {
-  const callSeq = appendToolCall(session, turn, step, block)
-  appendToolResult(session, turn, step, block, {
+/** Record or append the synthetic result for a model call skipped after cancellation. */
+function recordSkippedToolCall(
+  session: Session,
+  turn: number,
+  step: number,
+  call: PlannedCall,
+  pendingCommits?: Map<PlannedCall, PendingCommit>,
+): void {
+  const result: ToolExecutionResult = {
     content: [{ type: 'text', text: 'Error: tool call aborted before dispatch' }],
     isError: true,
     error: {
       message: 'tool call aborted before dispatch',
       info: { name: 'AbortError', code: TOOL_ABORTED_BEFORE_DISPATCH },
     },
-  }, callSeq)
+  }
+  const callSeq = call.callSeq ?? appendToolCall(session, turn, step, call.block)
+  if (pendingCommits === undefined) {
+    appendToolResult(session, turn, step, call.block, result, callSeq)
+  } else {
+    pendingCommits.set(call, { call, result, callSeq })
+  }
+}
+
+/** Publish a reordered batch in original model order and report a terminal result. */
+function publishPendingCommits(
+  session: Session,
+  turn: number,
+  step: number,
+  planned: PlannedCall[],
+  pendingCommits: Map<PlannedCall, PendingCommit> | undefined,
+  acceptContext: (context: UserMessage) => void,
+): boolean {
+  if (pendingCommits === undefined) return false
+  let concluded = false
+  for (const call of planned) {
+    const pending = pendingCommits.get(call)
+    /* v8 ignore next -- every reordered call is finalized or receives a synthetic abort result. */
+    if (pending === undefined) throw new Error('tool-call scheduler: missing reordered result')
+    publishToolResult(session, turn, step, pending, acceptContext)
+    concluded ||= pending.result.concludesTurn === true
+  }
+  return concluded
 }
 
 /** Append a started call and return the event seq that its result must cite. */
 function appendToolCall(session: Session, turn: number, step: number, block: ToolCallBlock): number {
   const event = session.append('tool/call', { turn, step, callId: block.id, name: block.name, arguments: block.arguments })
   return event.seq
+}
+
+/** Publish one finalized result and its contexts at the durable model-order boundary. */
+function publishToolResult(
+  session: Session,
+  turn: number,
+  step: number,
+  pending: PendingCommit,
+  acceptContext: (context: UserMessage) => void,
+): void {
+  appendToolResult(session, turn, step, pending.call.block, pending.result, pending.callSeq)
+  for (const context of pending.result.additionalContexts ?? []) acceptContext(context)
 }
 
 /** Append a model-ordered result linked to its call event. */
