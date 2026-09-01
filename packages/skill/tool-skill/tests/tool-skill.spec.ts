@@ -302,6 +302,34 @@ describe('dsh-tool-skill', () => {
     expect(renderPrompt(await ctx.systemPrompt.assemble({ agent: agentForCwd('/workspace') }))).not.toContain('<available_skills>')
   })
 
+  it('fits whole skill entries into a deterministic catalog budget', async () => {
+    const home = await tempDir('tool-catalog-budget')
+    const ctx = await setup(home, { catalogDescriptionMaxLength: 50, catalogMaxCharacters: 38 })
+    for (const [name, description] of [
+      ['alpha-skill', 'First entry'],
+      ['beta-skill', 'Second entry'],
+      ['gamma-skill', 'Third entry'],
+    ] as const) {
+      ctx.skills.register({ name, description, source: 'runtime', content: `${name} body.` })
+    }
+
+    const prefix = await composePrefix(ctx, '/workspace')
+    const catalog = prefix.find(message => message.source.kind === 'skill-catalog')
+
+    expect(catalog?.source).toEqual({
+      kind: 'skill-catalog',
+      form: 'catalog',
+      entries: [
+        { name: 'alpha-skill', description: 'First entry' },
+      ],
+      omitted: 2,
+    })
+    expect(JSON.stringify(catalog)).toContain('2 additional skills omitted')
+    expect(JSON.stringify(catalog)).not.toContain('beta-skill')
+    expect(JSON.stringify(catalog)).not.toContain('gamma-skill')
+    expect(await ctx.skills.get('beta-skill')).toMatchObject({ content: 'beta-skill body.' })
+  })
+
   it('does not inject a catalog when no model-invocable skills are available', async () => {
     const home = await tempDir('tool-empty-catalog')
     const ctx = await setup(home)
@@ -755,6 +783,7 @@ describe('dsh-tool-skill', () => {
     await ctx.plugin(SkillFileSystem, { dshHome: join(home, '.dsh'), agentsHome: join(home, '.agents'), watch: false })
 
     await expect(ctx.plugin(toolSkill, { catalogDescriptionMaxLength: 2 })).rejects.toThrow('greater than or equal to 3')
+    await expect(ctx.plugin(toolSkill, { catalogMaxCharacters: 0 })).rejects.toThrow('catalogMaxCharacters')
   })
 
   it('loads a skill for the calling agent cwd', async () => {

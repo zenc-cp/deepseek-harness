@@ -14,7 +14,7 @@ Every catalog message carries the `skill-catalog` source: a `catalog`-form conte
 
 The catalog is omitted when no model-invocable skills are initially available, and also when that agent's tool view restricts away the shipped `skill` tool or resolves a same-name scoped shadow instead. Identity is compared against the definition this plugin registered rather than a lookup of its own name, so the plugin works mounted globally or inside one agent's composition, where `register()` files into that agent's layer alone. Visibility changes participate in the digest, keeping prompt guidance, model-visible schema, and executable dispatch aligned.
 
-`catalogDescriptionMaxLength` controls normalized catalog descriptions; rendering XML-escapes them. Its default is `500` and values must be integers of at least `3`, which reserves room for a truncation ellipsis. The [skill catalog hot-refresh Agent Note](../../../.agents/notes/implemented/feature/2026-07-27-skill-catalog-hot-refresh.md) owns the durable initial catalog and replacement lifecycle.
+`catalogDescriptionMaxLength` controls normalized catalog descriptions; rendering XML-escapes them. Its default is `500` and values must be integers of at least `3`, which reserves room for a truncation ellipsis. Optional `catalogMaxCharacters` limits the total rendered entry-line characters. The catalog keeps a deterministic prefix of complete entries, reports how many additional skills were omitted, and still permits explicitly named skills to load on demand. The [skill catalog hot-refresh Agent Note](../../../.agents/notes/implemented/feature/2026-07-27-skill-catalog-hot-refresh.md) owns the durable initial catalog and replacement lifecycle.
 
 ## Tool: `skill`
 
@@ -55,7 +55,7 @@ A user may also invoke a skill directly; its <skill_content> block then appears 
 
 #### Token effect
 
-Repeated input cost scales with skill count and `catalogDescriptionMaxLength`; no initial catalog tokens are sent when the list is empty or the tool is hidden or shadowed. Each actual catalog change adds one retained complete replacement message.
+Repeated input cost scales with skill count and `catalogDescriptionMaxLength`, and can be bounded with `catalogMaxCharacters`; no initial catalog tokens are sent when the list is empty or the tool is hidden or shadowed. Each actual catalog change adds one retained complete replacement message.
 
 #### KV Cache effect
 

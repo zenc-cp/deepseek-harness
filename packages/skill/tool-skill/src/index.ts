@@ -38,6 +38,8 @@ export interface SkillCatalogSource {
   readonly update?: true
   /** Exactly the entries this message published, in catalog order. */
   readonly entries: readonly { readonly name: string; readonly description: string }[]
+  /** Number of model-invocable skills omitted by the configured catalog budget. */
+  readonly omitted?: number
 }
 
 declare module '@deepseek-ai/dsh-llm' {
@@ -61,11 +63,17 @@ function catalogSourceEntries(
 export interface Config {
   /** Maximum normalized description length rendered in the session catalog; minimum 3. */
   catalogDescriptionMaxLength?: number
+  /**
+   * Optional total character budget for complete rendered catalog entry lines.
+   * Entries retain deterministic catalog order and are never partially rendered.
+   */
+  catalogMaxCharacters?: number
 }
 
 /** Validate and default the model-facing skill catalog configuration. */
 export const Config: z<Config> = z.object({
   catalogDescriptionMaxLength: z.number().default(DEFAULT_CATALOG_DESCRIPTION_MAX_LENGTH),
+  catalogMaxCharacters: z.number(),
 })
 
 /**
@@ -76,7 +84,9 @@ export const Config: z<Config> = z.object({
  */
 export function apply(ctx: Context, config: Config = {}): void {
   const catalogDescriptionMaxLength = config.catalogDescriptionMaxLength ?? DEFAULT_CATALOG_DESCRIPTION_MAX_LENGTH
+  const catalogMaxCharacters = config.catalogMaxCharacters
   assertPositiveInteger('catalogDescriptionMaxLength', catalogDescriptionMaxLength, 3)
+  if (catalogMaxCharacters !== undefined) assertPositiveInteger('catalogMaxCharacters', catalogMaxCharacters)
 
   const skillTool = defineTool({
     name: 'skill',
@@ -224,8 +234,10 @@ export function apply(ctx: Context, config: Config = {}): void {
     signal.throwIfAborted()
     if (!snapshot.complete) return decision
     const skills = snapshot.skills.filter(isModelInvocable)
-    const entries = catalogSourceEntries(skills, catalogDescriptionMaxLength)
-    const digest = digestCatalogEntries(entries)
+    const allEntries = catalogSourceEntries(skills, catalogDescriptionMaxLength)
+    const entries = fitCatalogEntries(allEntries, catalogMaxCharacters)
+    const omitted = allEntries.length - entries.length
+    const digest = digestCatalogEntries(entries, omitted)
     const history = catalogHistory(agent)
     const existing = catalogMessage(decision.messages)
     if (history.visibleDigest === digest) {
@@ -233,15 +245,15 @@ export function apply(ctx: Context, config: Config = {}): void {
         ? decision
         : { kind: 'enter', messages: decision.messages.filter(message => message.id !== existing.message.id) }
     }
-    if (existing !== undefined && digestCatalogEntries(existing.entries) === digest) return decision
+    if (existing !== undefined && digestCatalogEntries(existing.entries, existing.omitted) === digest) return decision
     if (!history.published && skills.length === 0) {
       return existing === undefined
         ? decision
         : { kind: 'enter', messages: decision.messages.filter(message => message.id !== existing.message.id) }
     }
     const catalog = history.published
-      ? renderCatalogUpdate(entries)
-      : renderCatalogMessage(entries)
+      ? renderCatalogUpdate(entries, omitted)
+      : renderCatalogMessage(entries, omitted)
     return {
       kind: 'enter',
       messages: existing === undefined
@@ -251,7 +263,7 @@ export function apply(ctx: Context, config: Config = {}): void {
   })
 }
 
-function renderCatalogMessage(entries: SkillCatalogSource['entries']): UserMessage {
+function renderCatalogMessage(entries: SkillCatalogSource['entries'], omitted: number): UserMessage {
   return createUserMessage({
     content: [{
       type: 'text',
@@ -261,6 +273,7 @@ function renderCatalogMessage(entries: SkillCatalogSource['entries']): UserMessa
         '',
         '<available_skills>',
         ...renderCatalogEntries(entries),
+        ...renderOmittedSkills(omitted),
         '</available_skills>',
         '',
         "If the user names a skill, or the task clearly matches a skill's description, call the `skill` tool with the exact skill name before taking task actions. Load all applicable skills, then follow their full instructions. This catalog contains summaries only; do not infer or follow a skill's instructions until it has been loaded.",
@@ -272,16 +285,22 @@ function renderCatalogMessage(entries: SkillCatalogSource['entries']): UserMessa
       kind: 'skill-catalog',
       form: 'catalog',
       entries,
+      ...omitted === 0 ? {} : { omitted },
     },
   })
 }
 
-function renderCatalogUpdate(entries: SkillCatalogSource['entries']): UserMessage {
+function renderCatalogUpdate(entries: SkillCatalogSource['entries'], omitted: number): UserMessage {
   const availability = entries.length === 0
-    ? [
-      'No skills are currently available through the `skill` tool. Do not use names from earlier skill catalogs.',
-      'A user may still invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool for it.',
-    ]
+    ? omitted === 0
+      ? [
+        'No skills are currently available through the `skill` tool. Do not use names from earlier skill catalogs.',
+        'A user may still invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool for it.',
+      ]
+      : [
+        'No skill summaries fit the current catalog budget. Do not use names from earlier skill catalogs.',
+        'If the user names a skill, call the `skill` tool with that exact name; omitted skills remain loadable on demand.',
+      ]
     : [
       'Use only names in this replacement catalog. If the user names a listed skill, or the task clearly matches its description, call the `skill` tool with the exact name before acting.',
       'A user may also invoke a skill directly; its <skill_content> block then appears in this conversation. Follow it, and do not call the `skill` tool again for that skill.',
@@ -295,6 +314,7 @@ function renderCatalogUpdate(entries: SkillCatalogSource['entries']): UserMessag
         '',
         '<available_skills>',
         ...renderCatalogEntries(entries),
+        ...renderOmittedSkills(omitted),
         '</available_skills>',
         '',
         ...availability,
@@ -306,8 +326,26 @@ function renderCatalogUpdate(entries: SkillCatalogSource['entries']): UserMessag
       form: 'catalog',
       update: true,
       entries,
+      ...omitted === 0 ? {} : { omitted },
     },
   })
+}
+
+/** Keep a deterministic prefix of whole catalog entries within an optional rendered-character budget. */
+function fitCatalogEntries(
+  entries: SkillCatalogSource['entries'],
+  maxCharacters: number | undefined,
+): SkillCatalogSource['entries'] {
+  if (maxCharacters === undefined) return entries
+  const fitted: SkillCatalogSource['entries'][number][] = []
+  let used = 0
+  for (const entry of entries) {
+    const length = renderCatalogEntry(entry).length
+    if (used + length > maxCharacters) break
+    fitted.push(entry)
+    used += length
+  }
+  return fitted
 }
 
 /**
@@ -317,7 +355,15 @@ function renderCatalogUpdate(entries: SkillCatalogSource['entries']): UserMessag
  * no escapable character.
  */
 function renderCatalogEntries(entries: SkillCatalogSource['entries']): string[] {
-  return entries.map(entry => `- \`${entry.name}\`: ${escapeText(entry.description)}`)
+  return entries.map(renderCatalogEntry)
+}
+
+function renderCatalogEntry(entry: SkillCatalogSource['entries'][number]): string {
+  return `- \`${entry.name}\`: ${escapeText(entry.description)}`
+}
+
+function renderOmittedSkills(omitted: number): string[] {
+  return omitted === 0 ? [] : [`- ${omitted} additional skills omitted by the catalog budget.`]
 }
 
 /**
@@ -325,10 +371,13 @@ function renderCatalogEntries(entries: SkillCatalogSource['entries']): string[] 
  * The entries are what changes; the surrounding `<system-reminder>` framing is
  * written for the model and must not decide whether a republish is needed.
  */
-function digestCatalogEntries(entries: SkillCatalogSource['entries']): string {
+function digestCatalogEntries(entries: SkillCatalogSource['entries'], omitted = 0): string {
   // JSON per entry rather than a separator character: every separator is itself
   // a legal description character, so only quoting makes the boundary exact.
-  const canonical = entries.map(entry => JSON.stringify([entry.name, entry.description])).join('\n')
+  const canonical = [
+    ...entries.map(entry => JSON.stringify([entry.name, entry.description])),
+    JSON.stringify(['omitted', omitted]),
+  ].join('\n')
   return createHash('sha256')
     .update(canonical)
     .digest('hex')
@@ -369,20 +418,26 @@ function catalogHistory(agent: Agent): { visibleDigest?: string; published: bool
     if (event.type !== 'user/message' || event.data.source.kind !== 'skill-catalog') continue
     const entries = readCatalogEntries(event.data.source)
     if (entries === undefined) continue
-    const digest = digestCatalogEntries(entries)
+    const omitted = readCatalogOmitted(event.data.source)
+    const digest = digestCatalogEntries(entries, omitted)
     published = true
     if (visible.has(event.seq)) return { visibleDigest: digest, published }
   }
   return { published }
 }
 
+function readCatalogOmitted(source: unknown): number {
+  const omitted = (source as { omitted?: unknown }).omitted
+  return Number.isSafeInteger(omitted) && (omitted as number) > 0 ? omitted as number : 0
+}
+
 function catalogMessage(
   messages: readonly UserMessage[],
-): { message: UserMessage; entries: SkillCatalogSource['entries'] } | undefined {
+): { message: UserMessage; entries: SkillCatalogSource['entries']; omitted: number } | undefined {
   for (const message of messages) {
     if (message.source.kind !== 'skill-catalog') continue
     const entries = readCatalogEntries(message.source)
-    if (entries !== undefined) return { message, entries }
+    if (entries !== undefined) return { message, entries, omitted: readCatalogOmitted(message.source) }
   }
   return undefined
 }

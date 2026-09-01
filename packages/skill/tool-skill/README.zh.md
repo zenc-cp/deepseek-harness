@@ -14,7 +14,7 @@
 
 如果最初没有模型可调用 skill，则省略目录；如果该 agent（智能体）的工具视图排除了随附的 `skill` 工具，或解析出同名的作用域内遮蔽项，也会省略目录。身份比对针对本插件所注册的那个定义，而非按自身名字回查，因此本插件既可全局挂载，也可挂在单个 agent 的组装内——在后者中 `register()` 只注册到该 agent 的层中。可见性变更参与 digest 计算，使提示词指引、模型可见 schema 和可执行分派保持对齐。
 
-`catalogDescriptionMaxLength` 控制规范化后的目录描述，渲染时会对其执行 XML 转义。其默认值是 `500`，且必须是不小于 `3` 的整数，以便为截断省略号保留空间。[skill 目录热刷新 Agent Note](../../../.agents/notes/implemented/feature/2026-07-27-skill-catalog-hot-refresh.md) 负责定义持久初始目录和替换目录的生命周期。
+`catalogDescriptionMaxLength` 控制规范化后的目录描述，渲染时会对其执行 XML 转义。其默认值是 `500`，且必须是不小于 `3` 的整数，以便为截断省略号保留空间。可选的 `catalogMaxCharacters` 限制所有目录条目行的渲染字符总数。目录会保留完整条目的确定性前缀、报告省略的额外 skill 数量，并仍允许按名称按需加载 skill。[skill 目录热刷新 Agent Note](../../../.agents/notes/implemented/feature/2026-07-27-skill-catalog-hot-refresh.md) 负责定义持久初始目录和替换目录的生命周期。
 
 ## 工具：`skill`
 
@@ -55,7 +55,7 @@ A user may also invoke a skill directly; its <skill_content> block then appears 
 
 #### Token 影响
 
-重复输入成本随 skill 数量和 `catalogDescriptionMaxLength` 增长；当列表为空或工具被隐藏或遮蔽时，不会发送初始目录 token。每次实际目录变更都会添加一条保留的完整替换消息。
+重复输入成本随 skill 数量和 `catalogDescriptionMaxLength` 增长，并可通过 `catalogMaxCharacters` 设定上限；当列表为空或工具被隐藏或遮蔽时，不会发送初始目录 token。每次实际目录变更都会添加一条保留的完整替换消息。
 
 #### KV Cache 影响
 
