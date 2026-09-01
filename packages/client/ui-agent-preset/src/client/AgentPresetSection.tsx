@@ -13,7 +13,8 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import {
-  Button, IconBrowseOutline16, IconCopyOutline16, IconFolderOpenOutline16, IconPlusOutline16, IconTrashOutline16, Modal, Tooltip,
+  Button, IconBrowseOutline16, IconCopyOutline16, IconFolderOpenOutline16,
+  IconInspectOutline12, IconPlusOutline16, IconTrashOutline16, Modal, Tooltip,
 } from '@deepseek-ai/dsh-client-ui-primitives'
 import type { SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import type { InjectFace, PropsLocale, PropsRuntime } from '@deepseek-ai/dsh-client-ui-slots'
@@ -33,6 +34,12 @@ export interface AgentPresetSectionInjected {
   view: (id: string) => Promise<void>
   /** Close the read-only viewer. */
   closeView: () => void
+  /** Inspect one preset's resolved runtime composition. */
+  inspect: (id: string) => Promise<void>
+  /** Compare the open inspection with another preset. */
+  compareWith: (id: string) => Promise<void>
+  /** Close the resolved composition inspector. */
+  closeInspection: () => void
   /** Open the copy dialog over one preset. */
   beginCopy: (from: string) => void
   /** Close the copy dialog, discarding the draft. */
@@ -319,6 +326,19 @@ export function AgentPresetSection(props: AgentPresetSectionProps): ReactNode {
                             <IconFolderOpenOutline16 />
                           </button>
                         )}
+                      {row.broken === undefined
+                        ? (
+                          <button
+                            type="button"
+                            className={css.iconButton}
+                            data-tip={t('inspect')}
+                            aria-label={`${t('inspect')}: ${text.name}`}
+                            onClick={() => { void props.inspect(row.id) }}
+                          >
+                            <IconInspectOutline12 size={16} />
+                          </button>
+                        )
+                        : null}
                       <button
                         type="button"
                         className={css.iconButton}
@@ -387,6 +407,87 @@ export function AgentPresetSection(props: AgentPresetSectionProps): ReactNode {
         {state.view === null
           ? null
           : <pre className={css.viewerCode}>{state.view.content}</pre>}
+      </Modal>
+      <Modal
+        open={state.inspection !== null}
+        onClose={() => { props.closeInspection() }}
+        title={state.inspection === null ? '' : `${t('inspectTitle')} · ${state.inspection.id}`}
+        closeLabel={t('close')}
+        description={t('inspectDescription')}
+        className={css.inspectDialog as string}
+        footer={<Button variant="outline" onClick={() => { props.closeInspection() }}>{t('close')}</Button>}
+      >
+        {state.inspection === null
+          ? null
+          : (
+            <div className={css.inspector}>
+              <div className={css.inspectSummary}>
+                <span>{`${state.inspection.manifest.rows.length} ${t('rows')}`}</span>
+                <span>{`${state.inspection.manifest.tools.length} ${t('tools')}`}</span>
+                <span>{`${state.inspection.manifest.promptSections.length} ${t('promptSections')}`}</span>
+                <span>{`${state.inspection.manifest.services.length} ${t('services')}`}</span>
+              </div>
+              <label className={css.compareField}>
+                <span>{t('compareWith')}</span>
+                <select
+                  className={css.input}
+                  value={state.inspection.compareId ?? ''}
+                  disabled={state.inspection.loading}
+                  onChange={(event) => { void props.compareWith(event.target.value) }}
+                >
+                  <option value="">{t('noComparison')}</option>
+                  {state.rows.filter(row => row.id !== state.inspection?.id && row.broken === undefined).map(row => (
+                    <option key={row.id} value={row.id}>{presetDisplayText(row, t).name}</option>
+                  ))}
+                </select>
+              </label>
+              <div className={css.inspectGrid}>
+                <section>
+                  <h4>{t('resolvedRows')}</h4>
+                  <ul className={css.inspectList}>
+                    {state.inspection.manifest.rows.map(row => (
+                      <li key={row.id}>
+                        <span className={row.enabled ? css.enabledDot : css.disabledDot} />
+                        <code>{row.id}</code>
+                        <span>{row.module}</span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+                <section>
+                  <h4>{t('capabilities')}</h4>
+                  <p className={css.inspectLine}>
+                    <strong>{t('tools')}:</strong> {state.inspection.manifest.tools.map(tool => tool.name).join(', ') || t('none')}
+                  </p>
+                  <p className={css.inspectLine}>
+                    <strong>{t('promptSections')}:</strong>{' '}
+                    {state.inspection.manifest.promptSections.map(item => item.name).join(', ') || t('none')}
+                  </p>
+                  <p className={css.inspectLine}>
+                    <strong>{t('services')}:</strong> {state.inspection.manifest.services.join(', ') || t('none')}
+                  </p>
+                </section>
+              </div>
+              {state.inspection.diff === null
+                ? null
+                : (
+                  <section className={css.diffSection}>
+                    <h4>
+                      {state.inspection.loading
+                        ? t('comparing')
+                        : `${t('changes')} (${state.inspection.diff.changes.length})`}
+                    </h4>
+                    {state.inspection.diff.changes.length === 0
+                      ? <p className={css.inspectLine}>{t('noChanges')}</p>
+                      : (
+                        <ul className={css.diffList}>
+                          {state.inspection.diff.changes.map(change => <li key={change.path}><code>{change.path}</code></li>)}
+                        </ul>
+                      )}
+                  </section>
+                )}
+            </div>
+          )}
       </Modal>
       <Modal
         open={state.pendingDelete !== null}

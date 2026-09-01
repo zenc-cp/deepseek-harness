@@ -102,6 +102,8 @@ const PRIVILEGED_METHODS = new Set([
   // any caller that may start a session at all can already run commands as this
   // process. Pinning the switch would be a fence beside an open gate.
   'agentPreset.read',
+  'agentPreset.inspect',
+  'agentPreset.diff',
   'agentPreset.copy',
   'agentPreset.openDocument',
   'agentPreset.remove',

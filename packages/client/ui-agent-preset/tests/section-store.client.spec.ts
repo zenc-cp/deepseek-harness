@@ -78,6 +78,26 @@ function fakeApi(
           hasDocument: options.hasDocument ?? true,
         })
       },
+      inspect: (payload: { agentPreset: string }) => {
+        record('inspect', payload)
+        return ok({ manifest: {
+          version: 1,
+          preset: { id: payload.agentPreset, trust: presets.get(payload.agentPreset)?.trust ?? 'user' },
+          rows: [{ id: 'tool', module: '@example/tool', enabled: true, config: {} }],
+          tools: [{ name: `${payload.agentPreset}-tool`, description: 'Tool' }],
+          promptSections: [{ name: `preset:${payload.agentPreset}` }],
+          services: [],
+        } })
+      },
+      diff: (payload: { before: string; after: string }) => {
+        record('diff', payload)
+        return ok({ before: payload.before, after: payload.after, diff: {
+          version: 1,
+          changes: payload.before === payload.after ? [] : [
+            { path: 'preset.id', before: payload.before, after: payload.after },
+          ],
+        } })
+      },
       read: (payload: { agentPreset: string }) => {
         record('read', payload)
         if (options.throwRead === true) return Promise.reject(new Error('socket closed'))
@@ -259,6 +279,37 @@ describe('the read-only viewer', () => {
     await controller.view('standard')
 
     expect(controller.store.getSnapshot().error).toContain('socket closed')
+  })
+})
+
+describe('resolved preset inspection', () => {
+  it('opens a redacted runtime manifest and compares it with another preset', async () => {
+    const { controller, calls } = harness()
+    await controller.load()
+
+    await controller.inspect('standard')
+    await controller.compareWith('mine')
+
+    expect(controller.store.getSnapshot().inspection).toMatchObject({
+      id: 'standard',
+      manifest: { version: 1, preset: { id: 'standard' } },
+      compareId: 'mine',
+      diff: { version: 1, changes: [{ path: 'preset.id', before: 'standard', after: 'mine' }] },
+    })
+    expect(calls.slice(-2)).toEqual([
+      { method: 'inspect', payload: { agentPreset: 'standard' } },
+      { method: 'diff', payload: { before: 'standard', after: 'mine' } },
+    ])
+  })
+
+  it('clears inspection state when closed', async () => {
+    const { controller } = harness()
+    await controller.load()
+    await controller.inspect('standard')
+
+    controller.closeInspection()
+
+    expect(controller.store.getSnapshot().inspection).toBeNull()
   })
 })
 

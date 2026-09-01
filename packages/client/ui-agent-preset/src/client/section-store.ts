@@ -14,7 +14,10 @@
  * more than the row it targeted.
  */
 
-import type { IApiClient } from '@deepseek-ai/dsh-api-remotes/client'
+import type { IApiClient, ResponseValue } from '@deepseek-ai/dsh-api-remotes/client'
+
+type PresetManifest = ResponseValue<'agentPreset.inspect'>['manifest']
+type PresetManifestDiff = ResponseValue<'agentPreset.diff'>['diff']
 import { createSnapshotStore, type SnapshotStore } from '@deepseek-ai/dsh-client-runtime/client'
 import { beginRosterRead, messageOf, writeDefaultPreset } from './settings-store.ts'
 
@@ -68,6 +71,15 @@ export interface PresetView {
   content: string
 }
 
+/** Open resolved-composition inspection and its optional comparison. */
+export interface PresetInspection {
+  id: string
+  manifest: PresetManifest
+  compareId: string | null
+  diff: PresetManifestDiff | null
+  loading: boolean
+}
+
 /** Page snapshot. */
 export interface AgentPresetSectionState {
   status: 'idle' | 'loading' | 'ready' | 'unavailable' | 'error'
@@ -81,8 +93,10 @@ export interface AgentPresetSectionState {
   rows: readonly PresetRow[]
   /** The open copy dialog, or null. */
   copy: CopyDraft | null
-  /** The open read-only viewer, or null. */
+  /** The open read-only source viewer, or null. */
   view: PresetView | null
+  /** The open resolved manifest inspector, or null. */
+  inspection: PresetInspection | null
   /** The preset awaiting delete confirmation. */
   pendingDelete: string | null
   /** Whether a delete is in flight. */
@@ -102,6 +116,7 @@ const INITIAL: AgentPresetSectionState = {
   rows: [],
   copy: null,
   view: null,
+  inspection: null,
   pendingDelete: null,
   deleting: false,
   revealedPaths: {},
@@ -208,6 +223,47 @@ export class AgentPresetSectionController {
   /** Close the read-only viewer. */
   closeView(): void {
     this.set({ view: null })
+  }
+
+  /** Resolve and open one preset's redacted runtime manifest. */
+  async inspect(id: string): Promise<void> {
+    this.set({ error: null })
+    try {
+      const response = await this.api.agentPresets.inspect({ agentPreset: id })
+      if (!response.result.ok) {
+        this.set({ error: response.result.error.message })
+        return
+      }
+      this.set({ inspection: { id, manifest: response.result.value.manifest, compareId: null, diff: null, loading: false } })
+    } catch (error) {
+      this.set({ error: messageOf(error) })
+    }
+  }
+
+  /** Compare the open manifest with another resolved preset. */
+  async compareWith(compareId: string): Promise<void> {
+    const inspection = this.store.getSnapshot().inspection
+    if (inspection === null || inspection.loading) return
+    if (compareId === '') {
+      this.set({ inspection: { ...inspection, compareId: null, diff: null } })
+      return
+    }
+    this.set({ inspection: { ...inspection, compareId, loading: true }, error: null })
+    try {
+      const response = await this.api.agentPresets.diff({ before: inspection.id, after: compareId })
+      if (!response.result.ok) {
+        this.set({ inspection: { ...inspection, compareId, loading: false }, error: response.result.error.message })
+        return
+      }
+      this.set({ inspection: { ...inspection, compareId, diff: response.result.value.diff, loading: false } })
+    } catch (error) {
+      this.set({ inspection: { ...inspection, compareId, loading: false }, error: messageOf(error) })
+    }
+  }
+
+  /** Close the resolved manifest inspector. */
+  closeInspection(): void {
+    this.set({ inspection: null })
   }
 
   /**

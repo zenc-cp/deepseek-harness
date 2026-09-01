@@ -277,6 +277,125 @@
   white-space: nowrap;
 }
 
+.inspectDialog {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.inspector {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.inspectSummary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.inspectSummary span {
+  padding: 4px 9px;
+  border: 1px solid var(--dsw-alias-border-l2);
+  border-radius: 999px;
+  color: var(--dsw-alias-label-secondary);
+  font-size: 12px;
+}
+
+.compareField {
+  display: grid;
+  grid-template-columns: max-content minmax(180px, 280px);
+  align-items: center;
+  gap: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--dsw-alias-label-secondary);
+}
+
+.inspectGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.15fr) minmax(0, .85fr);
+  gap: 20px;
+}
+
+.inspectGrid h4,
+.diffSection h4 {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--dsw-alias-label-primary);
+}
+
+.inspectList,
+.diffList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.inspectList li {
+  display: grid;
+  grid-template-columns: 8px minmax(90px, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--dsw-alias-label-tertiary);
+}
+
+.inspectList code,
+.diffList code {
+  color: var(--dsw-alias-label-primary);
+  font-family: var(--dsw-font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  overflow-wrap: anywhere;
+}
+
+.enabledDot,
+.disabledDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+}
+
+.enabledDot {
+  background: var(--dsw-alias-brand-primary);
+}
+
+.disabledDot {
+  border: 1px solid var(--dsw-alias-label-dimmed);
+}
+
+.inspectLine {
+  margin: 0 0 8px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--dsw-alias-label-secondary);
+  overflow-wrap: anywhere;
+}
+
+.diffSection {
+  padding-top: 14px;
+  border-top: 1px solid var(--dsw-alias-border-l2);
+}
+
+.diffList li {
+  padding: 6px 8px;
+  border-radius: 6px;
+  background: var(--dsw-alias-bg-layer-2);
+  font-size: 12px;
+}
+
+@media (max-width: 620px) {
+  .inspectGrid {
+    grid-template-columns: 1fr;
+  }
+
+  .compareField {
+    grid-template-columns: 1fr;
+  }
+}
+
 .secondaryButton {
   border: none;
   border-radius: 7px;

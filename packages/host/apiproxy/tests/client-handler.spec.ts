@@ -94,6 +94,8 @@ function scriptedApi(overrides: {
       list: r => ok(r, { presets: [], authorable: false, hasDocument: false }),
       select: r => ok(r, { agentPreset: r.payload.agentPreset }),
       read: r => ok(r, { agentPreset: r.payload.agentPreset, trust: 'user' as const, content: '' }),
+      inspect: r => ok(r, { manifest: { version: 1 as const, preset: { id: r.payload.agentPreset, trust: 'user' as const }, rows: [], tools: [], promptSections: [], services: [] } }),
+      diff: r => ok(r, { before: r.payload.before, after: r.payload.after, diff: { version: 1 as const, changes: [] } }),
       copy: r => ok(r, { agentPreset: r.payload.agentPreset }),
       openDocument: r => ok(r, { opened: true as const }),
       remove: r => ok(r, {}),

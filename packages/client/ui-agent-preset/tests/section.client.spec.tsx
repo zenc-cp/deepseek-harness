@@ -28,6 +28,7 @@ const READY: AgentPresetSectionState = {
   ],
   copy: null,
   view: null,
+  inspection: null,
   pendingDelete: null,
   deleting: false,
   revealedPaths: {},
@@ -50,6 +51,9 @@ function renderSection(
     ...options.creator === false ? {} : { startCreatorDraft: vi.fn() },
     view: vi.fn(() => Promise.resolve()),
     closeView: vi.fn(),
+    inspect: vi.fn(() => Promise.resolve()),
+    compareWith: vi.fn(() => Promise.resolve()),
+    closeInspection: vi.fn(),
     beginCopy: vi.fn(),
     cancelCopy: vi.fn(),
     setCopyId: vi.fn(),
@@ -152,8 +156,10 @@ describe('the preset list', () => {
     const standard = rowFor('standard')
     expect(within(standard).getByRole('button', { name: `${en.view}: ${en.presetStandardName}` })).toBeTruthy()
     expect(within(standard).queryByRole('button', { name: `${en.openLocation}: ${en.presetStandardName}` })).toBeNull()
+    expect(within(standard).getByRole('button', { name: `${en.inspect}: ${en.presetStandardName}` })).toBeTruthy()
     const mine = rowFor('mine')
     expect(within(mine).getByRole('button', { name: `${en.openLocation}: mine` })).toBeTruthy()
+    expect(within(mine).getByRole('button', { name: `${en.inspect}: mine` })).toBeTruthy()
     expect(within(mine).queryByRole('button', { name: `${en.view}: mine` })).toBeNull()
   })
 
@@ -380,6 +386,43 @@ describe('the copy dialog', () => {
     fireEvent.keyDown(document, { key: 'Escape' })
 
     expect(actions.cancelCopy).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('the resolved preset inspector', () => {
+  const inspection: AgentPresetSectionState['inspection'] = {
+    id: 'standard',
+    manifest: {
+      version: 1,
+      preset: { id: 'standard', trust: 'system' },
+      rows: [{ id: 'tool', module: '@example/tool', enabled: true, config: {} }],
+      tools: [{ name: 'read', description: 'Read files' }],
+      promptSections: [{ name: 'harness:identity' }],
+      services: ['tools'],
+    },
+    compareId: null,
+    diff: null,
+    loading: false,
+  }
+
+  it('shows resolved capabilities and offers valid comparison targets', () => {
+    renderSection({ inspection })
+
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByText('@example/tool')).toBeTruthy()
+    expect(within(dialog).getByText(/harness:identity/)).toBeTruthy()
+    fireEvent.change(within(dialog).getByRole('combobox'), { target: { value: 'mine' } })
+    expect(screen.getByRole('option', { name: 'mine' })).toBeTruthy()
+  })
+
+  it('renders path-addressed differences', () => {
+    renderSection({ inspection: {
+      ...inspection,
+      compareId: 'mine',
+      diff: { version: 1, changes: [{ path: 'tools.read', before: { name: 'read' } }] },
+    } })
+
+    expect(within(screen.getByRole('dialog')).getByText('tools.read')).toBeTruthy()
   })
 })
 

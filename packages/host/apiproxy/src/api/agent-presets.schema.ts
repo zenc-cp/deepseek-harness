@@ -7,6 +7,8 @@ import { z } from 'zod'
 import type { RequestPayload, ResponseValue } from './rpc-map.ts'
 import type { Wire } from './rpc.schema.ts'
 import { sessionIdSchema } from './sessions.schema.ts'
+import type { PresetManifest, PresetManifestChange, PresetManifestDiff } from '@deepseek-ai/dsh-agent-presets'
+import type { JsonValue } from '@deepseek-ai/dsh-session'
 import type { AgentPresetEntry } from './agent-presets.ts'
 
 /** AgentPresetEntry row of agentPreset.list. */
@@ -54,6 +56,31 @@ export const agentPresetReadValueSchema = z.object({
   name: z.string().optional(),
   description: z.string().optional(),
 }) satisfies z.ZodType<Wire<ResponseValue<'agentPreset.read'>>>
+
+const jsonValueSchema: z.ZodType<JsonValue> = z.lazy(() => z.union([
+  z.null(), z.boolean(), z.number(), z.string(), z.array(jsonValueSchema), z.record(z.string(), jsonValueSchema),
+]))
+const presetManifestSchema = z.object({
+  version: z.literal(1),
+  preset: z.object({ id: z.string(), trust: z.union([z.literal('system'), z.literal('user')]) }),
+  rows: z.array(z.object({ id: z.string(), module: z.string(), enabled: z.boolean(), config: jsonValueSchema })),
+  tools: z.array(z.object({ name: z.string(), description: z.string() })),
+  promptSections: z.array(z.object({ name: z.string() })),
+  services: z.array(z.string()),
+}) satisfies z.ZodType<Wire<PresetManifest>>
+const presetManifestChangeSchema = z.object({
+  path: z.string(), before: jsonValueSchema.optional(), after: jsonValueSchema.optional(),
+}) satisfies z.ZodType<Wire<PresetManifestChange>>
+const presetManifestDiffSchema = z.object({
+  version: z.literal(1), changes: z.array(presetManifestChangeSchema),
+}) satisfies z.ZodType<Wire<PresetManifestDiff>>
+
+export const agentPresetInspectRequestSchema = z.object({ agentPreset: z.string().min(1) }) satisfies z.ZodType<Wire<RequestPayload<'agentPreset.inspect'>>>
+export const agentPresetInspectValueSchema = z.object({ manifest: presetManifestSchema }) satisfies z.ZodType<Wire<ResponseValue<'agentPreset.inspect'>>>
+export const agentPresetDiffRequestSchema = z.object({ before: z.string().min(1), after: z.string().min(1) }) satisfies z.ZodType<Wire<RequestPayload<'agentPreset.diff'>>>
+export const agentPresetDiffValueSchema = z.object({
+  before: z.string(), after: z.string(), diff: presetManifestDiffSchema,
+}) satisfies z.ZodType<Wire<ResponseValue<'agentPreset.diff'>>>
 
 /** agentPreset.copy request payload. */
 export const agentPresetCopyRequestSchema = z.object({

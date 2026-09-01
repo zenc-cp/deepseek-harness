@@ -9,6 +9,7 @@
  * path), copying and deleting still rearrange what the deployment offers.
  */
 
+import type { PresetManifest, PresetManifestDiff } from '@deepseek-ai/dsh-agent-presets'
 import type { SessionId } from '@deepseek-ai/dsh-session/types'
 import type { RpcRequest, RpcResponse } from './rpc.ts'
 
@@ -85,6 +86,14 @@ export interface AgentPresetsApi {
     name?: string
     description?: string
   }>>
+
+  /** Resolve one preset into its deterministic, redacted runtime manifest. */
+  inspect(request: RpcRequest<{ agentPreset: string }>):
+  Promise<RpcResponse<{ manifest: PresetManifest }>>
+
+  /** Compare two resolved preset manifests without exposing prompt text or paths. */
+  diff(request: RpcRequest<{ before: string; after: string }>):
+  Promise<RpcResponse<{ before: string; after: string; diff: PresetManifestDiff }>>
 
   /**
    * Create a locally authored preset by copying an existing one whole.

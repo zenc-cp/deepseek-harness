@@ -42,7 +42,8 @@ import {
 } from '../api/workspace.schema.ts'
 import { skillListValueSchema } from '../api/skills.schema.ts'
 import {
-  agentPresetCopyValueSchema, agentPresetListValueSchema, agentPresetOpenDocumentValueSchema,
+  agentPresetCopyValueSchema, agentPresetDiffValueSchema, agentPresetInspectValueSchema,
+  agentPresetListValueSchema, agentPresetOpenDocumentValueSchema,
   agentPresetReadValueSchema, agentPresetRemoveValueSchema, agentPresetSelectValueSchema,
 } from '../api/agent-presets.schema.ts'
 import {
@@ -128,6 +129,8 @@ export interface IApiClient {
     list(payload: RequestPayload<'agentPreset.list'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'agentPreset.list'>>>
     select(payload: RequestPayload<'agentPreset.select'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'agentPreset.select'>>>
     read(payload: RequestPayload<'agentPreset.read'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'agentPreset.read'>>>
+    inspect(payload: RequestPayload<'agentPreset.inspect'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'agentPreset.inspect'>>>
+    diff(payload: RequestPayload<'agentPreset.diff'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'agentPreset.diff'>>>
     copy(payload: RequestPayload<'agentPreset.copy'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'agentPreset.copy'>>>
     openDocument(payload: RequestPayload<'agentPreset.openDocument'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'agentPreset.openDocument'>>>
     remove(payload: RequestPayload<'agentPreset.remove'>, signal?: AbortSignal): Promise<RpcResponse<ResponseValue<'agentPreset.remove'>>>
@@ -202,6 +205,8 @@ const UNARY_VALUE_SCHEMAS: { [K in keyof RpcMethodMap]: z.ZodType<Wire<ResponseV
   'agentPreset.list': agentPresetListValueSchema,
   'agentPreset.select': agentPresetSelectValueSchema,
   'agentPreset.read': agentPresetReadValueSchema,
+  'agentPreset.inspect': agentPresetInspectValueSchema,
+  'agentPreset.diff': agentPresetDiffValueSchema,
   'agentPreset.copy': agentPresetCopyValueSchema,
   'agentPreset.openDocument': agentPresetOpenDocumentValueSchema,
   'agentPreset.remove': agentPresetRemoveValueSchema,
@@ -466,6 +471,8 @@ export abstract class AbstractApiClient implements IApiClient {
     list: (payload, signal) => this.callUnary('agentPreset.list', payload, signal),
     select: (payload, signal) => this.callUnary('agentPreset.select', payload, signal),
     read: (payload, signal) => this.callUnary('agentPreset.read', payload, signal),
+    inspect: (payload, signal) => this.callUnary('agentPreset.inspect', payload, signal),
+    diff: (payload, signal) => this.callUnary('agentPreset.diff', payload, signal),
     copy: (payload, signal) => this.callUnary('agentPreset.copy', payload, signal),
     openDocument: (payload, signal) => this.callUnary('agentPreset.openDocument', payload, signal),
     remove: (payload, signal) => this.callUnary('agentPreset.remove', payload, signal),

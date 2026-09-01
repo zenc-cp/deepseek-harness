@@ -17,6 +17,8 @@ export type AgentPresetSettingsKey =
   | 'openLocation' | 'showLocation' | 'revealedPathLabel'
   | 'idRequired' | 'idInvalid' | 'idTaken'
   | 'deleteTitle' | 'deleteDescription' | 'deleteConfirm' | 'deleting'
+  | 'inspect' | 'inspectTitle' | 'inspectDescription' | 'rows' | 'tools' | 'promptSections' | 'services'
+  | 'compareWith' | 'noComparison' | 'resolvedRows' | 'capabilities' | 'none' | 'changes' | 'noChanges' | 'comparing'
 
 /** English copy. */
 export const en: Record<AgentPresetSettingsKey, string> = {
@@ -82,6 +84,21 @@ export const en: Record<AgentPresetSettingsKey, string> = {
     'The preset directory is deleted. Sessions already running on it keep working; new sessions cannot select it.',
   deleteConfirm: 'Delete',
   deleting: 'Deleting…',
+  inspect: 'Inspect resolved preset',
+  inspectTitle: 'Resolved preset',
+  inspectDescription: 'What the agent actually receives after this preset is mounted. Secrets, prompt text, and local paths are omitted.',
+  rows: 'rows',
+  tools: 'tools',
+  promptSections: 'prompt sections',
+  services: 'services',
+  compareWith: 'Compare with',
+  noComparison: 'No comparison',
+  resolvedRows: 'Resolved rows',
+  capabilities: 'Capabilities',
+  none: 'None',
+  changes: 'Changes',
+  noChanges: 'No differences in the resolved manifests.',
+  comparing: 'Comparing…',
 }
 
 /** Simplified Chinese copy. */
@@ -139,6 +156,21 @@ export const zh: Record<AgentPresetSettingsKey, string> = {
   deleteDescription: '预设目录将被删除。已在其上运行的会话不受影响；新会话将无法再选择它。',
   deleteConfirm: '删除',
   deleting: '正在删除…',
+  inspect: '检查解析后的预设',
+  inspectTitle: '解析后的预设',
+  inspectDescription: '预设挂载后 Agent 实际获得的组成。密钥、提示词正文和本地路径均不显示。',
+  rows: '个条目',
+  tools: '个工具',
+  promptSections: '个提示词区段',
+  services: '个服务',
+  compareWith: '对比预设',
+  noComparison: '不对比',
+  resolvedRows: '解析后的条目',
+  capabilities: '能力',
+  none: '无',
+  changes: '变更',
+  noChanges: '解析后的清单没有差异。',
+  comparing: '正在对比…',
 }
 
 /** Preset roster fields needed to resolve Web display copy. */

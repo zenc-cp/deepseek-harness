@@ -2727,6 +2727,18 @@ function createFixtureWorld(options: FixtureOptions): FixtureWorld {
           content: preset.content,
         })
       },
+      inspect: request => ok(request, { manifest: {
+        version: 1 as const,
+        preset: { id: request.payload.agentPreset, trust: fixturePresets.get(request.payload.agentPreset)?.trust ?? 'user' },
+        rows: [], tools: [], promptSections: [], services: [],
+      } }),
+      diff: request => ok(request, {
+        before: request.payload.before,
+        after: request.payload.after,
+        diff: { version: 1 as const, changes: request.payload.before === request.payload.after ? [] : [
+          { path: 'preset.id', before: request.payload.before, after: request.payload.after },
+        ] },
+      }),
       copy: (request) => {
         const { from, agentPreset } = request.payload
         const source = fixturePresets.get(from)
@@ -3109,6 +3121,8 @@ export class FixtureApiClient extends AbstractApiClient {
       case 'agentPreset.list': return this.api.agentPresets.list(request)
       case 'agentPreset.select': return this.api.agentPresets.select(request)
       case 'agentPreset.read': return this.api.agentPresets.read(request)
+      case 'agentPreset.inspect': return this.api.agentPresets.inspect(request)
+      case 'agentPreset.diff': return this.api.agentPresets.diff(request)
       case 'agentPreset.copy': return this.api.agentPresets.copy(request)
       case 'agentPreset.openDocument': return this.api.agentPresets.openDocument(request, new AbortController().signal)
       case 'agentPreset.remove': return this.api.agentPresets.remove(request)

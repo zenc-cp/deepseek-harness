@@ -29,7 +29,7 @@ import {
 } from '@deepseek-ai/dsh-workspace'
 // Type-only: brings the `ctx.tools` Context merge into this program (viewFor reads presenters).
 import {
-  InvalidPresetIdError, PresetExistsError, PresetMountError,
+  diffPresetManifests, InvalidPresetIdError, PresetExistsError, PresetMountError,
   PresetNotWritableError, resolveSessionPreset, UnknownPresetError,
 } from '@deepseek-ai/dsh-agent-presets'
 import type { PresetBearingSession } from '@deepseek-ai/dsh-agent-presets'
@@ -3091,6 +3091,30 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
           })
         } catch (error: unknown) {
           return err(request, presetError(agentPreset, error))
+        }
+      },
+
+      async inspect(request) {
+        const { agentPreset } = request.payload
+        const presets = ctx.get('agentPresets')
+        if (presets === undefined) return err(request, noRoster(agentPreset))
+        try {
+          return ok(request, { manifest: await presets.manifest(agentPreset) })
+        } catch (error: unknown) {
+          return err(request, presetError(agentPreset, error))
+        }
+      },
+
+      async diff(request) {
+        const { before, after } = request.payload
+        const presets = ctx.get('agentPresets')
+        if (presets === undefined) return err(request, noRoster(before))
+        try {
+          const baseline = await presets.manifest(before)
+          const comparison = await presets.manifest(after)
+          return ok(request, { before, after, diff: diffPresetManifests(baseline, comparison) })
+        } catch (error: unknown) {
+          return err(request, presetError(before, error))
         }
       },
 

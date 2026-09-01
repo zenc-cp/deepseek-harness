@@ -61,6 +61,18 @@ function roster(ids: readonly string[], userIds: readonly string[] = []): unknow
     },
     authorable: true,
     read: (id: string) => Promise.resolve(`# ${id}\n- id: x\n  name: y\n`),
+    manifest: (id?: string) => {
+      const wanted = id ?? ids[0] ?? ''
+      if (!ids.includes(wanted)) return Promise.reject(new UnknownPresetError(wanted, ids))
+      return Promise.resolve({
+        version: 1 as const,
+        preset: { id: wanted, trust: trustOf(wanted) },
+        rows: [{ id: wanted, module: `@example/${wanted}`, enabled: true, config: {} }],
+        tools: [{ name: `${wanted}-tool`, description: `${wanted} tool` }],
+        promptSections: [{ name: `preset:${wanted}` }],
+        services: [`${wanted}-service`],
+      })
+    },
     copy: (from: string, id: string) => {
       if (!ids.includes(from)) return Promise.reject(new UnknownPresetError(from, ids))
       if (!/^[a-z0-9][a-z0-9-]*$/.test(id)) return Promise.reject(new InvalidPresetIdError(id))
@@ -479,6 +491,28 @@ describe('authoring over the wire', () => {
     // starts from, and trust is what tells a surface to say so.
     expect(response.result.value.trust).toBe('system')
     expect(response.result.value.content).toContain('- id: x')
+  })
+
+  it('returns a redacted resolved manifest and an offline diff', async () => {
+    const { api } = await harness(['standard', 'minimal'])
+
+    const inspected = await api.agentPresets.inspect(request({ agentPreset: 'standard' }))
+    const compared = await api.agentPresets.diff(request({ before: 'minimal', after: 'standard' }))
+
+    expect(inspected.result).toMatchObject({
+      ok: true,
+      value: { manifest: { version: 1, preset: { id: 'standard', trust: 'system' } } },
+    })
+    expect(compared.result).toMatchObject({
+      ok: true,
+      value: {
+        before: 'minimal',
+        after: 'standard',
+        diff: { version: 1, changes: expect.arrayContaining([
+          { path: 'preset.id', before: 'minimal', after: 'standard' },
+        ]) },
+      },
+    })
   })
 
   it('copies a preset under a new id', async () => {

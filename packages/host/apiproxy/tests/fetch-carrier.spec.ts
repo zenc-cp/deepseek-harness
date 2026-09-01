@@ -207,6 +207,14 @@ function fakeApi(overrides: Partial<{ muxFrames: MuxFrame[]; hostFrames: HostFra
         const value = { agentPreset: request.payload.agentPreset, trust: 'user' as const, content: '' }
         return Promise.resolve({ rpcId: request.rpcId, result: { ok: true as const, value } })
       },
+      inspect(request: RpcRequest<{ agentPreset: string }>) {
+        const value = { manifest: { version: 1 as const, preset: { id: request.payload.agentPreset, trust: 'user' as const }, rows: [], tools: [], promptSections: [], services: [] } }
+        return Promise.resolve({ rpcId: request.rpcId, result: { ok: true as const, value } })
+      },
+      diff(request: RpcRequest<{ before: string; after: string }>) {
+        const value = { before: request.payload.before, after: request.payload.after, diff: { version: 1 as const, changes: [] } }
+        return Promise.resolve({ rpcId: request.rpcId, result: { ok: true as const, value } })
+      },
       copy(request: RpcRequest<{ from: string; agentPreset: string }>) {
         const value = { agentPreset: request.payload.agentPreset }
         return Promise.resolve({ rpcId: request.rpcId, result: { ok: true as const, value } })
