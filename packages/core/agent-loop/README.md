@@ -194,6 +194,8 @@ These limits define when the loop needs special care. They are current package c
 <details>
 <summary>Working context for maintainers — click to expand</summary>
 
-None.
+`TurnStepState` (`src/turn-step-state.ts`) is the versioned frozen snapshot for one turn/step. It is not `SESSION_FORMAT_VERSION` and not session-checkpoint-policy. The driver (`kick` / `turn` / `preStep` / `step`) is not wired to it.
+
+Field mapping from the live `Phase`, inbox queues, `PreparedStep`, `requestHeaderLogged`, and `requestSurfaceGeneration` lives in that module.
 
 </details>

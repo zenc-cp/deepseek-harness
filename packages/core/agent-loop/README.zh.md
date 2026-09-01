@@ -194,6 +194,8 @@ const handle = await ctx.agents.create({
 <details>
 <summary>维护者的工作上下文——点击展开</summary>
 
-无。
+`TurnStepState`（`src/turn-step-state.ts`）是单个 turn/step 的版本化冻结快照。它不是 `SESSION_FORMAT_VERSION`，也不是 session-checkpoint-policy。驱动器（`kick` / `turn` / `preStep` / `step`）尚未接入。
+
+当前可变 `Phase`、Inbox 队列、`PreparedStep`、`requestHeaderLogged` 与 `requestSurfaceGeneration` 对应的字段见该模块。
 
 </details>
