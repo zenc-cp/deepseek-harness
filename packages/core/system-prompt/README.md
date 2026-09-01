@@ -82,6 +82,10 @@ Schema tokens repeat on every request. Restricting a tool removes its entire sch
 
 Prefix-stable while the visible schema set, rendering, and order are unchanged. Registration, restriction, or reordering may invalidate reuse from the first changed schema token.
 
+## Gated prompt-evolution records
+
+`decidePromptEvolution(candidate, gate)` evaluates a digest-only, single-lineage prompt candidate against matched evaluation seeds, training improvement, non-regressing held-out results, a completed leakage check, and a maximum character-growth ratio. Per-model transfer scores are retained as evidence but do not silently override the primary held-out gate. Rejected decisions include machine-readable reasons. `rollbackPromptEvolution(decision, reason)` records restoration to the base digest and accepts only an already accepted decision. These helpers never expose prompt text or mutate, register, deploy, or activate a prompt.
+
 ## Known Limitations and Deferred Work
 
 - **Deployment-authored prompt text is config/composition only** — this plugin owns the global persona default, creator plugins may register agent-scoped shadows, and other sections come from the plugin that owns the fact; there is no end-user prompt-editing API.

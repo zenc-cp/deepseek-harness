@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
-import SystemPrompt, { AssembleContext, PromptAssembly, renderContextSnapshot, renderPrompt } from '@deepseek-ai/dsh-system-prompt'
+import SystemPrompt, {
+  AssembleContext,
+  decidePromptEvolution,
+  PromptAssembly,
+  renderContextSnapshot,
+  renderPrompt,
+  rollbackPromptEvolution,
+} from '@deepseek-ai/dsh-system-prompt'
 
 /**
  * Every assembly carries the plugin's own built-ins — `harness:identity`
@@ -13,6 +20,52 @@ const IDENTITY = 'You are an AI agent powered by DeepSeek Harness.'
 function contributed(assembly: PromptAssembly): PromptAssembly['sections'] {
   return assembly.sections.filter(section => !BUILT_IN.includes(section.name))
 }
+
+describe('prompt evolution decisions', () => {
+  const candidate = {
+    baseDigest: 'sha256:base',
+    candidateDigest: 'sha256:candidate',
+    baseCharacters: 1000,
+    candidateCharacters: 1120,
+    matchedSeeds: ['seed-1', 'seed-2'],
+    training: { baseline: 0.6, candidate: 0.8 },
+    heldOut: { baseline: 0.62, candidate: 0.7 },
+    leakage: { checked: true, matches: 0 },
+    transfer: [
+      { model: 'deepseek-v4', baseline: 0.65, candidate: 0.73 },
+      { model: 'gpt-5', baseline: 0.7, candidate: 0.71 },
+    ],
+  } as const
+
+  it('accepts a matched candidate that improves training and held-out scores within growth limits', () => {
+    expect(decidePromptEvolution(candidate, { maxGrowthRatio: 0.25 })).toMatchObject({
+      ...candidate,
+      status: 'accepted',
+      promptGrowthRatio: 0.12,
+    })
+  })
+
+  it('rejects held-out regressions, leakage, and excess prompt growth', () => {
+    expect(decidePromptEvolution({
+      ...candidate, heldOut: { baseline: 0.62, candidate: 0.61 },
+    }, { maxGrowthRatio: 0.25 }).status).toBe('rejected')
+    expect(decidePromptEvolution({
+      ...candidate, leakage: { checked: true, matches: 1 },
+    }, { maxGrowthRatio: 0.25 }).status).toBe('rejected')
+    expect(decidePromptEvolution({
+      ...candidate, candidateCharacters: 1300,
+    }, { maxGrowthRatio: 0.25 }).status).toBe('rejected')
+  })
+
+  it('requires matched evaluation seeds and rolls accepted prompts back by digest', () => {
+    expect(() => decidePromptEvolution({ ...candidate, matchedSeeds: [] }, { maxGrowthRatio: 0.25 }))
+      .toThrow('matchedSeeds')
+    const accepted = decidePromptEvolution(candidate, { maxGrowthRatio: 0.25 })
+    expect(rollbackPromptEvolution(accepted, 'transfer regression')).toMatchObject({
+      status: 'rolled-back', activeDigest: 'sha256:base', rollbackReason: 'transfer regression',
+    })
+  })
+})
 
 describe('SystemPrompt', () => {
   describe('built-in sections', () => {

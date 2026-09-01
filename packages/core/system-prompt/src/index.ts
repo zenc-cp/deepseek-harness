@@ -10,6 +10,121 @@ import { AnonymousEntries, NamedEntries, ScopedLayers, scopeTarget } from '@deep
 import type { ScopeKey, ScopeLayer, Scoped } from '@deepseek-ai/dsh-scope'
 import type { ContextSnapshotSection, ToolSchema } from '@deepseek-ai/dsh-llm'
 
+/** Baseline and candidate scores measured on the same task instances and seeds. */
+export interface PromptScorePair {
+  readonly baseline: number
+  readonly candidate: number
+}
+
+/** Leakage scan result over held-out expected outputs. */
+export interface PromptLeakageCheck {
+  readonly checked: boolean
+  readonly matches: number
+}
+
+/** One model's baseline and candidate scores for transfer evaluation. */
+export interface PromptTransferScore extends PromptScorePair {
+  readonly model: string
+}
+
+/** Pure-data candidate for a single-lineage prompt revision. Prompt text is deliberately absent. */
+export interface PromptEvolutionCandidate {
+  readonly baseDigest: string
+  readonly candidateDigest: string
+  readonly baseCharacters: number
+  readonly candidateCharacters: number
+  readonly matchedSeeds: readonly string[]
+  readonly training: PromptScorePair
+  readonly heldOut: PromptScorePair
+  readonly leakage: PromptLeakageCheck
+  readonly transfer: readonly PromptTransferScore[]
+}
+
+/** Gate configuration for a prompt candidate. */
+export interface PromptEvolutionGate {
+  readonly maxGrowthRatio: number
+}
+
+/** Immutable accepted or rejected prompt-evolution decision. */
+export interface PromptEvolutionDecision extends PromptEvolutionCandidate {
+  readonly status: 'accepted' | 'rejected'
+  readonly promptGrowthRatio: number
+  readonly rejectionReasons: readonly string[]
+}
+
+/** Accepted prompt decision restored to its base digest. */
+export interface RolledBackPromptEvolution extends Omit<PromptEvolutionDecision, 'status'> {
+  readonly status: 'rolled-back'
+  readonly activeDigest: string
+  readonly rollbackReason: string
+}
+
+/** Gate a prompt revision using paired training, held-out, leakage, and size evidence. */
+export function decidePromptEvolution(
+  candidate: PromptEvolutionCandidate,
+  gate: PromptEvolutionGate,
+): PromptEvolutionDecision {
+  validatePromptCandidate(candidate, gate)
+  const promptGrowthRatio = (candidate.candidateCharacters - candidate.baseCharacters) / candidate.baseCharacters
+  const rejectionReasons: string[] = []
+  if (candidate.training.candidate <= candidate.training.baseline) rejectionReasons.push('training did not improve')
+  if (candidate.heldOut.candidate < candidate.heldOut.baseline) rejectionReasons.push('held-out score regressed')
+  if (!candidate.leakage.checked) rejectionReasons.push('held-out leakage was not checked')
+  if (candidate.leakage.matches > 0) rejectionReasons.push('held-out leakage matches were detected')
+  if (promptGrowthRatio > gate.maxGrowthRatio) rejectionReasons.push('prompt growth exceeded the gate')
+  return {
+    ...candidate,
+    status: rejectionReasons.length === 0 ? 'accepted' : 'rejected',
+    promptGrowthRatio,
+    rejectionReasons,
+  }
+}
+
+/** Record rollback of an accepted prompt decision without mutating the active prompt. */
+export function rollbackPromptEvolution(
+  decision: PromptEvolutionDecision,
+  reason: string,
+): RolledBackPromptEvolution {
+  if (decision.status !== 'accepted') throw new Error('prompt evolution rollback requires an accepted decision')
+  if (reason.trim() === '') throw new Error('prompt evolution rollback requires a reason')
+  return { ...decision, status: 'rolled-back', activeDigest: decision.baseDigest, rollbackReason: reason }
+}
+
+function validatePromptCandidate(candidate: PromptEvolutionCandidate, gate: PromptEvolutionGate): void {
+  if (candidate.baseDigest.trim() === '' || candidate.candidateDigest.trim() === '') {
+    throw new Error('prompt evolution digests must be non-empty')
+  }
+  if (candidate.baseDigest === candidate.candidateDigest) throw new Error('prompt evolution digests must differ')
+  if (!Number.isSafeInteger(candidate.baseCharacters) || candidate.baseCharacters < 1
+    || !Number.isSafeInteger(candidate.candidateCharacters) || candidate.candidateCharacters < 1) {
+    throw new Error('prompt evolution character counts must be positive safe integers')
+  }
+  if (candidate.matchedSeeds.length === 0 || candidate.matchedSeeds.some(seed => seed.trim() === '')) {
+    throw new Error('prompt evolution matchedSeeds must contain non-empty evaluation seeds')
+  }
+  if (new Set(candidate.matchedSeeds).size !== candidate.matchedSeeds.length) {
+    throw new Error('prompt evolution matchedSeeds must be unique')
+  }
+  validateScorePair(candidate.training, 'training')
+  validateScorePair(candidate.heldOut, 'heldOut')
+  if (!Number.isSafeInteger(candidate.leakage.matches) || candidate.leakage.matches < 0) {
+    throw new Error('prompt evolution leakage matches must be a non-negative safe integer')
+  }
+  for (const transfer of candidate.transfer) {
+    if (transfer.model.trim() === '') throw new Error('prompt evolution transfer model must be non-empty')
+    validateScorePair(transfer, `transfer ${transfer.model}`)
+  }
+  if (!Number.isFinite(gate.maxGrowthRatio) || gate.maxGrowthRatio < 0) {
+    throw new Error('prompt evolution maxGrowthRatio must be finite and non-negative')
+  }
+}
+
+function validateScorePair(pair: PromptScorePair, name: string): void {
+  if (!Number.isFinite(pair.baseline) || !Number.isFinite(pair.candidate)) {
+    throw new Error(`prompt evolution ${name} scores must be finite`)
+  }
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Context {
     systemPrompt: SystemPrompt
