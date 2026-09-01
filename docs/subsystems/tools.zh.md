@@ -553,6 +553,15 @@ schemas(scope?: ScopeKey): ToolSchema[]
 executionMode(exec: ToolExecutionInput): ToolExecutionMode
 
 /**
+ * Whether later identical calls of this tool in one assistant step may skip
+ * dispatch. Only an exact `true` declaration opts in; unknown, hidden, or
+ * unmarked tools keep every call.
+ * @param exec - call name, parsed arguments, and optional agent scope.
+ * @returns whether the scheduler may coalesce later identical calls.
+ */
+shouldCoalesceDuplicates(exec: ToolExecutionInput): boolean
+
+/**
  * Execute through pre-policy, guards, around-dispatch, post-policy,
  * definition-owned content finalization, and final notification. Tool and
  * listener failures resolve as materialized error results; an invisible tool

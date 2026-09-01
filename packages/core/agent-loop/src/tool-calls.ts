@@ -2,8 +2,8 @@
  * Schedules one assistant step's tool calls. Exclusive calls form barriers;
  * parallel calls use a bounded rolling pool and are reclassified before start.
  * Dispatch may overlap, while policy, results, and result context remain
- * model-ordered. Abort or an internal scheduler failure stops replenishment
- * and drains started calls.
+ * model-ordered. Opt-in identical calls skip later dispatches. Abort or an
+ * internal scheduler failure stops replenishment and drains started calls.
  *
  * Abort records synthetic error results for skipped calls so replay stays
  * valid. A terminal scheduler failure preserves already-recorded `tool/call`
@@ -12,7 +12,7 @@
  */
 
 import type { Context } from '@deepseek-ai/cordis'
-import { assertNever, createToolResultMessage, type ToolCallBlock } from '@deepseek-ai/dsh-llm'
+import { assertNever, createToolResultMessage, type CallId, type ToolCallBlock } from '@deepseek-ai/dsh-llm'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { TOOL_ABORTED_BEFORE_DISPATCH, TOOL_RUNTIME_SCHEDULER, type ToolExecutionInput, type ToolExecutionMode, type ToolExecutionResult, type ToolRunContext } from '@deepseek-ai/dsh-tools'
 
@@ -25,11 +25,9 @@ interface PlannedCall {
 }
 
 /** Settled dispatch awaiting model-order finalization. */
-interface Slot {
-  exec: ToolRunContext
-  result: ToolExecutionResult
-  needsPost: boolean
-}
+type Slot =
+  | { kind: 'pipeline'; exec: ToolRunContext; result: ToolExecutionResult; needsPost: boolean }
+  | { kind: 'synthetic'; result: ToolExecutionResult }
 
 /** Finalized result waiting for durable model-order publication. */
 interface PendingCommit {
@@ -88,6 +86,7 @@ export async function executeToolCalls(
     },
   }))
   const ordered = orderScheduledCalls(ctx, planned)
+  const coalesced = findCoalescedDuplicates(ctx, planned)
   const reordered = ordered.some((call, index) => call !== planned[index])
   if (reordered) {
     // Dispatch order may differ, but the durable call projection preserves the
@@ -110,7 +109,7 @@ export async function executeToolCalls(
       : 1
     const group = mode === 'parallel' && boundary < 0 ? tail : tail.slice(0, boundary)
     const outcome = await runGroup(
-      ctx, turn, step, group, mode, signal, acceptContext, pendingCommits,
+      ctx, turn, step, group, mode, signal, acceptContext, pendingCommits, coalesced,
     )
     next += outcome.consumed
     concluded ||= outcome.concluded
@@ -133,6 +132,55 @@ function orderScheduledCalls(ctx: Context, planned: PlannedCall[]): PlannedCall[
     target.push(call)
   }
   return [...ordinary, ...afterBatch]
+}
+
+/**
+ * Map later opt-in duplicates onto the first model-order call with the same
+ * name and canonical arguments. Unmarked tools never appear in the map.
+ */
+function findCoalescedDuplicates(ctx: Context, planned: PlannedCall[]): Map<PlannedCall, CallId> {
+  const winners = new Map<string, CallId>()
+  const coalesced = new Map<PlannedCall, CallId>()
+  for (const call of planned) {
+    if (!ctx.tools.shouldCoalesceDuplicates(call.exec)) continue
+    const key = `${call.exec.name}\n${canonicalizeToolArguments(call.exec.arguments)}`
+    const winner = winners.get(key)
+    if (winner === undefined) winners.set(key, call.block.id)
+    else coalesced.set(call, winner)
+  }
+  return coalesced
+}
+
+/**
+ * Deep key-sort of a parsed-JSON value so two argument objects that differ
+ * only in property order canonicalize identically.
+ */
+function sortJsonValue(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(sortJsonValue)
+  if (value !== null && typeof value === 'object') {
+    const record = value as Record<string, unknown>
+    const sorted: Record<string, unknown> = {}
+    for (const key of Object.keys(record).sort()) {
+      sorted[key] = sortJsonValue(record[key])
+    }
+    return sorted
+  }
+  return value
+}
+
+/** Canonical string form of a call's arguments: deep key-sort, then stringify. */
+function canonicalizeToolArguments(argumentsValue: unknown): string {
+  return JSON.stringify(sortJsonValue(argumentsValue))
+}
+
+/** Successful stub for a skipped duplicate; the model still receives one result. */
+function coalescedDuplicateResult(winner: CallId): ToolExecutionResult {
+  const text = `Skipped duplicate of call ${winner} in this step`
+  return {
+    isError: false,
+    value: [{ type: 'text', text }],
+    content: [{ type: 'text', text }],
+  }
 }
 
 /** Parse model arguments, preserving invalid JSON as text and mapping empty input to `{}`. */
@@ -161,7 +209,8 @@ async function runGroup(
   mode: ToolExecutionMode['kind'],
   signal: AbortSignal,
   acceptContext: (context: UserMessage) => void,
-  pendingCommits?: Map<PlannedCall, PendingCommit>,
+  pendingCommits: Map<PlannedCall, PendingCommit> | undefined,
+  coalesced: Map<PlannedCall, CallId>,
 ): Promise<GroupOutcome> {
   const { session } = ctx.agents.requireInitiator()
   const { maxParallelToolCalls } = ctx.agentLoop.config
@@ -184,9 +233,11 @@ async function runGroup(
       const slot = slots[committed]
       if (slot === undefined) break
       const call = group[committed]
-      const result = slot.needsPost
-        ? await ctx.tools[TOOL_RUNTIME_SCHEDULER].finalize(slot.exec, slot.result)
-        : ctx.tools[TOOL_RUNTIME_SCHEDULER].finish(slot.exec, slot.result)
+      const result = slot.kind === 'synthetic'
+        ? slot.result
+        : slot.needsPost
+          ? await ctx.tools[TOOL_RUNTIME_SCHEDULER].finalize(slot.exec, slot.result)
+          : ctx.tools[TOOL_RUNTIME_SCHEDULER].finish(slot.exec, slot.result)
       // oxlint-disable-next-line typescript/no-non-null-assertion -- bounded index
       const pending = { call: call!, result, callSeq: callSeqs[committed]! }
       if (pendingCommits === undefined) {
@@ -206,13 +257,23 @@ async function runGroup(
     const call = group[index]!
     callSeqs[index] = call.callSeq ?? appendToolCall(session, turn, step, call.block)
     started++
+    const winner = coalesced.get(call)
+    if (winner !== undefined) {
+      slots[index] = { kind: 'synthetic', result: coalescedDuplicateResult(winner) }
+      return
+    }
     const prepared = await ctx.tools[TOOL_RUNTIME_SCHEDULER].prepare(call.exec)
     throwSchedulerFailure()
     switch (prepared.kind) {
       case 'dispatch': {
         const promise = ctx.tools[TOOL_RUNTIME_SCHEDULER].dispatch(prepared.exec).then(
           (outcome) => {
-            slots[index] = { exec: prepared.exec, result: outcome.result, needsPost: outcome.kind === 'post-result' }
+            slots[index] = {
+              kind: 'pipeline',
+              exec: prepared.exec,
+              result: outcome.result,
+              needsPost: outcome.kind === 'post-result',
+            }
             return index
           },
           (error: unknown) => {
@@ -224,10 +285,10 @@ async function runGroup(
         break
       }
       case 'post-result':
-        slots[index] = { exec: prepared.exec, result: prepared.result, needsPost: true }
+        slots[index] = { kind: 'pipeline', exec: prepared.exec, result: prepared.result, needsPost: true }
         break
       case 'final-result':
-        slots[index] = { exec: prepared.exec, result: prepared.result, needsPost: false }
+        slots[index] = { kind: 'pipeline', exec: prepared.exec, result: prepared.result, needsPost: false }
         break
       /* v8 ignore next -- closed-union exhaustiveness guard */
       default:

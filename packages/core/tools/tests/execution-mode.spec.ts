@@ -168,3 +168,75 @@ describe('ToolRuntime.executionMode', () => {
     >()
   })
 })
+
+describe('ToolRuntime.shouldCoalesceDuplicates', () => {
+  it('returns true only for an exact true declaration', async () => {
+    const ctx = await setup()
+    ctx.tools.register(defineContentToolFixture({
+      name: 'reader',
+      description: 'idempotent',
+      parameters: {},
+      coalesceDuplicates: true,
+      async execute() { return [] },
+    }))
+    ctx.tools.register(defineContentToolFixture({
+      name: 'writer',
+      description: 'not coalesced',
+      parameters: {},
+      async execute() { return [] },
+    }))
+    expect(ctx.tools.shouldCoalesceDuplicates(exec('reader', {}))).toBe(true)
+    expect(ctx.tools.shouldCoalesceDuplicates(exec('writer', {}))).toBe(false)
+  })
+
+  it('returns false for an unknown tool', async () => {
+    const ctx = await setup()
+    expect(ctx.tools.shouldCoalesceDuplicates(exec('nonexistent', {}))).toBe(false)
+  })
+
+  it('returns false for a truthy non-boolean raw declaration', async () => {
+    const ctx = await setup()
+    const raw = {
+      name: 'truthy',
+      description: 'coalesce flag is a string',
+      parameters: { type: 'object', properties: {} },
+      output: { schema: { type: 'null' }, render: () => [] },
+      coalesceDuplicates: 'yes',
+      async execute() { return null },
+    } as unknown as ToolDefinition
+    ctx.tools.register(raw)
+    expect(ctx.tools.shouldCoalesceDuplicates(exec('truthy', {}))).toBe(false)
+  })
+
+  it('copies coalesceDuplicates onto a defineTool definition only when it is exactly true', () => {
+    const opted = defineContentToolFixture({
+      name: 'opted',
+      description: 'opted in',
+      parameters: {},
+      coalesceDuplicates: true,
+      async execute() { return [] },
+    })
+    const omitted = defineContentToolFixture({
+      name: 'omitted',
+      description: 'default',
+      parameters: {},
+      async execute() { return [] },
+    })
+    expect(opted.coalesceDuplicates).toBe(true)
+    expect(omitted.coalesceDuplicates).toBeUndefined()
+  })
+
+  it('coalesceDuplicates never reaches the model-facing schemas() projection', async () => {
+    const ctx = await setup()
+    ctx.tools.register(defineContentToolFixture({
+      name: 'reader',
+      description: 'idempotent',
+      parameters: {},
+      coalesceDuplicates: true,
+      async execute() { return [] },
+    }))
+    const schema = ctx.tools.schemas()[0] as unknown as Record<string, unknown>
+    expect(Object.keys(schema).sort()).toEqual(['description', 'name', 'parameters'])
+    expect(schema.coalesceDuplicates).toBeUndefined()
+  })
+})

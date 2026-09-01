@@ -510,6 +510,11 @@ export interface DefineToolOptions<S extends ParameterSchemaSpec, O extends Valu
    */
   readonly schedule?: 'after-batch'
   /**
+   * Skip later identical calls of this tool in the same assistant step. Only
+   * exact `true` opts in.
+   */
+  readonly coalesceDuplicates?: true
+  /**
    * Execute the tool after argument validation.
    * @param args - typed validated arguments.
    * @param exec - execution identity, caller, cancellation, and nesting data.
@@ -588,6 +593,7 @@ export function defineTool<const S extends ParameterSchemaSpec, const O extends 
     },
     ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
     ...(options.schedule !== undefined ? { schedule: options.schedule } : {}),
+    ...(options.coalesceDuplicates === true ? { coalesceDuplicates: true } : {}),
     async execute(args: unknown, exec: ToolRunContext): Promise<JsonValue> {
       const violations = validate(args)
       if (violations.length > 0) throw new ToolArgsError(violations)

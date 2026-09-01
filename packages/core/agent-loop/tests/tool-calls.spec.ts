@@ -60,7 +60,7 @@ function multiCall(calls: { id: string; name: string; args: object }[]): StreamC
 }
 
 /** A tool whose calls block until the test releases them by callId. */
-function gatedTool(name: string, parallel: boolean, schedule?: 'after-batch') {
+function gatedTool(name: string, parallel: boolean, schedule?: 'after-batch', coalesceDuplicates?: boolean) {
   const gates = new Map<string, () => void>()
   const started: string[] = []
   const tool = defineContentToolFixture({
@@ -69,6 +69,7 @@ function gatedTool(name: string, parallel: boolean, schedule?: 'after-batch') {
     parameters: { id: { type: 'string', required: true } },
     ...parallel ? { isConcurrencySafe: () => true } : {},
     ...schedule === undefined ? {} : { schedule },
+    ...coalesceDuplicates === true ? { coalesceDuplicates: true } : {},
     async execute(args) {
       started.push(args.id)
       await new Promise<void>((resolve) => { gates.set(args.id, resolve) })
@@ -259,6 +260,148 @@ describe('tool-call scheduler: grouping and barriers', () => {
     expect(replacement.started).toEqual(['3'])
     replacement.release('3')
     await waitForIdle(ctx, agent)
+  })
+})
+
+describe('tool-call scheduler: opt-in duplicate coalescing', () => {
+  it('executes the first identical opt-in call and stubs later ones without dispatch', async () => {
+    const adapter = new MockAdapter([
+      multiCall([
+        { id: 'c1', name: 'reader', args: { path: 'a' } },
+        { id: 'c2', name: 'reader', args: { path: 'a' } },
+        { id: 'c3', name: 'reader', args: { path: 'b' } },
+      ]),
+      textResponse('done'),
+    ])
+    const ctx = await harness(adapter)
+    const executed: string[] = []
+    const pre: string[] = []
+    ctx.tools.register(defineContentToolFixture({
+      name: 'reader',
+      description: 'idempotent',
+      parameters: { path: { type: 'string', required: true } },
+      coalesceDuplicates: true,
+      async execute(args) {
+        executed.push(args.path)
+        return [{ type: 'text', text: `read-${args.path}` }]
+      },
+    }))
+    ctx.on('tools/pre-execute', async (exec, next): Promise<PreToolDecision> => {
+      pre.push(String(exec.callId))
+      return next()
+    })
+    const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+
+    expect(executed).toEqual(['a', 'b'])
+    expect(pre).toEqual(['c1', 'c3'])
+    const results = events(agent).filter(e => e.type === 'tool/result')
+    expect(results.map(e => e.data.message.source.callId)).toEqual([CallId('c1'), CallId('c2'), CallId('c3')])
+    expect(results.map(e => e.data.message.content[0].isError)).toEqual([false, false, false])
+    expect((results[0]!.data.message.content[0].content[0] as { text: string }).text).toBe('read-a')
+    expect((results[1]!.data.message.content[0].content[0] as { text: string }).text).toContain('c1')
+    expect((results[2]!.data.message.content[0].content[0] as { text: string }).text).toBe('read-b')
+  })
+
+  it('still dispatches unmarked duplicates', async () => {
+    const adapter = new MockAdapter([
+      multiCall([
+        { id: 'c1', name: 'plain', args: { path: 'a' } },
+        { id: 'c2', name: 'plain', args: { path: 'a' } },
+      ]),
+      textResponse('done'),
+    ])
+    const ctx = await harness(adapter)
+    const executed: string[] = []
+    ctx.tools.register(defineContentToolFixture({
+      name: 'plain',
+      description: 'no coalesce flag',
+      parameters: { path: { type: 'string', required: true } },
+      async execute(args) {
+        executed.push(args.path)
+        return [{ type: 'text', text: `ran-${executed.length}` }]
+      },
+    }))
+    const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+    expect(executed).toEqual(['a', 'a'])
+  })
+
+  it('treats key-order-only argument differences as the same call', async () => {
+    const adapter = new MockAdapter([
+      multiCall([
+        { id: 'c1', name: 'reader', args: { b: 2, a: 1, items: [1, 2] } },
+        { id: 'c2', name: 'reader', args: { a: 1, items: [1, 2], b: 2 } },
+      ]),
+      textResponse('done'),
+    ])
+    const ctx = await harness(adapter)
+    let executed = 0
+    ctx.tools.register(defineContentToolFixture({
+      name: 'reader',
+      description: 'idempotent',
+      parameters: {
+        a: { type: 'number', required: true },
+        b: { type: 'number', required: true },
+        items: { type: 'array', items: { type: 'number' }, required: true },
+      },
+      coalesceDuplicates: true,
+      async execute() {
+        executed++
+        return [{ type: 'text', text: 'once' }]
+      },
+    }))
+    const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await waitForIdle(ctx, agent)
+    expect(executed).toBe(1)
+    const results = events(agent).filter(e => e.type === 'tool/result')
+    expect((results[1]!.data.message.content[0].content[0] as { text: string }).text).toContain('c1')
+  })
+
+  it('preserves model-order durable pairs when an after-batch duplicate is coalesced', async () => {
+    const adapter = new MockAdapter([
+      multiCall([
+        { id: 'c1', name: 'deferred', args: { id: 'same' } },
+        { id: 'c2', name: 'ordinary', args: { id: '2' } },
+        { id: 'c3', name: 'deferred', args: { id: 'same' } },
+      ]),
+      textResponse('done'),
+    ])
+    const ctx = await harness(adapter)
+    const ordinary = gatedParallelTool('ordinary')
+    const deferred = gatedTool('deferred', false, 'after-batch', true)
+    ctx.tools.register(ordinary.tool)
+    ctx.tools.register(deferred.tool)
+    const agent = ctx.agentLoop.create(SessionId('a1'), { provider: 'mock', model: 'mock' })
+
+    agent.followup(createUserMessage({ content: [{ type: 'text', text: 'go' }], source: { kind: 'user' } }))
+    await until(() => ordinary.started.length === 1)
+    expect(deferred.started).toEqual([])
+    ordinary.release('2')
+    await until(() => deferred.started.length === 1)
+    expect(deferred.started).toEqual(['same'])
+    deferred.release('same')
+    await waitForIdle(ctx, agent)
+
+    expect(deferred.started).toEqual(['same'])
+    const durableOrder = events(agent)
+      .filter(event => event.type === 'tool/call' || event.type === 'tool/result')
+      .map(event => event.type === 'tool/call'
+        ? `call:${event.data.callId}`
+        : `result:${event.data.message.source.callId}`)
+    expect(durableOrder).toEqual([
+      'call:c1',
+      'call:c2',
+      'call:c3',
+      'result:c1',
+      'result:c2',
+      'result:c3',
+    ])
+    const results = events(agent).filter(e => e.type === 'tool/result')
+    expect((results[2]!.data.message.content[0].content[0] as { text: string }).text).toContain('c1')
   })
 })
 

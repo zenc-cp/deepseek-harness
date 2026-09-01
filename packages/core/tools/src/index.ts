@@ -274,6 +274,13 @@ export interface ToolDefinition extends ToolSchema {
    */
   readonly schedule?: 'after-batch'
   /**
+   * Skip later identical calls of this tool in the same assistant step. Only
+   * exact `true` opts in; omission and any other value keep every call. Identity
+   * is the canonical tool name plus deep-key-sorted arguments. This metadata is
+   * never model-visible.
+   */
+  readonly coalesceDuplicates?: true
+  /**
    * Optional: how to present the PENDING state of one call in a UI, derived from
    * the call's `args` (parsed arguments, `unknown` — the tool validates/narrows
    * its own input). Returns a {@link ToolCallView} (a `card`-tagged render intent),
@@ -1294,6 +1301,18 @@ export class ToolRuntime extends Service {
     } catch {
       return mode('exclusive')
     }
+  }
+
+  /**
+   * Whether later identical calls of this tool in one assistant step may skip
+   * dispatch. Only an exact `true` declaration opts in; unknown, hidden, or
+   * unmarked tools keep every call.
+   * @param exec - call name, parsed arguments, and optional agent scope.
+   * @returns whether the scheduler may coalesce later identical calls.
+   */
+  shouldCoalesceDuplicates(exec: ToolExecutionInput): boolean {
+    const tool = this.resolveExecution(exec.name, exec.agent, exec.parent !== undefined)
+    return tool?.coalesceDuplicates === true
   }
 
   /**
