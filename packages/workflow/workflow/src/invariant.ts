@@ -5,6 +5,8 @@ import type { InvariantFailure, InvariantInstaller } from '@deepseek-ai/dsh-inva
 import type {
   WorkflowAgentEndInfo,
   WorkflowAgentInfo,
+  WorkflowDegradationInfo,
+  WorkflowProgressInfo,
   WorkflowResultInfo,
   WorkflowRunInfo,
 } from './types.ts'
@@ -48,6 +50,27 @@ function validateAgentEnd(start: WorkflowAgentInfo, end: WorkflowAgentEndInfo, f
 }
 
 /** Validate a terminal result against the accumulated run trace. */
+function validateProgress(progress: WorkflowProgressInfo, fail: InvariantFailure): void {
+  if (!Number.isFinite(progress.completed) || progress.completed < 0) {
+    fail('workflow/progress completed must be a finite non-negative number')
+  }
+  if (progress.total !== undefined) {
+    if (!Number.isFinite(progress.total) || progress.total < 0) {
+      fail('workflow/progress total must be a finite non-negative number')
+    }
+    if (progress.completed > progress.total) fail('workflow/progress completed must not exceed total')
+  }
+  if (progress.unit !== undefined && progress.unit.trim() === '') fail('workflow/progress unit must be non-empty')
+  if (progress.message !== undefined && progress.message.trim() === '') fail('workflow/progress message must be non-empty')
+}
+
+function validateDegradation(degradation: WorkflowDegradationInfo, fail: InvariantFailure): void {
+  if (degradation.code.trim() === '' || degradation.message.trim() === '') {
+    fail('workflow/degradation code and message must be non-empty')
+  }
+  if (typeof degradation.recoverable !== 'boolean') fail('workflow/degradation recoverable must be boolean')
+}
+
 function validateWorkflowEnd(trace: WorkflowTrace, result: WorkflowResultInfo, fail: InvariantFailure): void {
   if (trace.agents.size > 0) fail(`workflow/end has ${trace.agents.size} agent call(s) without workflow/agent-end`)
   if (!Number.isSafeInteger(result.agentsStarted) || result.agentsStarted < trace.starts) {
@@ -79,6 +102,14 @@ const install: InvariantInstaller = (ctx, fail) => {
     if (!eventName.startsWith('workflow/')) return
     const info = args[0] as WorkflowRunInfo
     const trace = traceFor(traces, info, fail)
+    if (eventName === 'workflow/progress') {
+      validateProgress(args[1] as WorkflowProgressInfo, fail)
+      return
+    }
+    if (eventName === 'workflow/degradation') {
+      validateDegradation(args[1] as WorkflowDegradationInfo, fail)
+      return
+    }
     if (eventName === 'workflow/agent-start') {
       const agent = args[1] as WorkflowAgentInfo
       if (!Number.isSafeInteger(agent.seq) || agent.seq < 1 || String(agent.childId).length === 0) {

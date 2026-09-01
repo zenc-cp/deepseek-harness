@@ -181,6 +181,8 @@ class WorkerThreadWorkflowEngine extends WorkflowEngine {
       {
         phase: (title) => { this.emitWorkflowEvent('workflow/phase', info, title) },
         log: (message) => { this.emitWorkflowEvent('workflow/log', info, message) },
+        progress: (progress) => { this.emitWorkflowEvent('workflow/progress', info, progress) },
+        degradation: (degradation) => { this.emitWorkflowEvent('workflow/degradation', info, degradation) },
         agentStart: (agent) => { this.emitWorkflowEvent('workflow/agent-start', info, agent) },
         agentEnd: (agent) => { this.emitWorkflowEvent('workflow/agent-end', info, agent) },
       },

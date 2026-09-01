@@ -149,6 +149,8 @@ export async function runWorkerSession(port: MessagePort, init: WorkerInit): Pro
   const observer: ExecutionObserver = {
     phase: (title) => { post(WorkerToHostType.Phase, { title }) },
     log: (message) => { post(WorkerToHostType.Log, { message }) },
+    progress: (info) => { post(WorkerToHostType.Progress, { info }) },
+    degradation: (info) => { post(WorkerToHostType.Degradation, { info }) },
     agentStart: (info) => { post(WorkerToHostType.AgentStart, { info }) },
     agentEnd: (info) => { post(WorkerToHostType.AgentEnd, { info }) },
   }

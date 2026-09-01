@@ -7,7 +7,9 @@
  * @module @deepseek-ai/dsh-workflow-worker-thread/protocol
  */
 
-import type { WorkflowAgentEndInfo, WorkflowAgentInfo, WorkflowResult } from '@deepseek-ai/dsh-workflow'
+import type {
+  WorkflowAgentEndInfo, WorkflowAgentInfo, WorkflowDegradationInfo, WorkflowProgressInfo, WorkflowResult,
+} from '@deepseek-ai/dsh-workflow'
 import type { ChildResult, ChildStartRequest } from './types.ts'
 
 /** Message tags the worker sends the host (the wire values are the tag strings). */
@@ -18,6 +20,10 @@ export enum WorkerToHostType {
   Phase = 'phase',
   /** Observer narration: a `log(message)` call. */
   Log = 'log',
+  /** Observer progress: a `progress(info)` call. */
+  Progress = 'progress',
+  /** Observer degradation: a `degradation(info)` call. */
+  Degradation = 'degradation',
   /** Observer lifecycle: one `agent()` call started a child. */
   AgentStart = 'agent-start',
   /** Observer lifecycle: one `agent()` call settled. */
@@ -38,6 +44,10 @@ export interface WorkerToHostPayloads {
   [WorkerToHostType.Phase]: { title: string }
   /** The logged message, verbatim. */
   [WorkerToHostType.Log]: { message: string }
+  /** Structured progress observation. */
+  [WorkerToHostType.Progress]: { info: WorkflowProgressInfo }
+  /** Structured degraded-operation observation. */
+  [WorkerToHostType.Degradation]: { info: WorkflowDegradationInfo }
   /** The call's sequence number, label, phase, and child id. */
   [WorkerToHostType.AgentStart]: { info: WorkflowAgentInfo }
   /** The call identity plus its outcome. */

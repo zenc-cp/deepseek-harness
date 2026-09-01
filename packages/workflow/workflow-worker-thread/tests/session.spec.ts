@@ -113,6 +113,8 @@ describe('runWorkerSession over an in-process MessageChannel', () => {
     const session = runWorkerSession(host.port, init(`
       phase('Scan')
       log('starting with ' + args.files.length + ' files')
+      progress({ completed: 0, total: args.files.length, unit: 'files' })
+      degradation({ code: 'CACHE_FALLBACK', message: 'Using cached index', recoverable: true })
       const answers = await pipeline(args.files, (prev, item) => agent('read ' + item))
       return { answers }
     `, { files: ['a.ts', 'b.ts'] }))
@@ -124,6 +126,12 @@ describe('runWorkerSession over an in-process MessageChannel', () => {
     expect(host.messages[0]!.type).toBe('ready')
     expect(host.ofType(WorkerToHostType.Phase).map(m => m.title)).toEqual(['Scan'])
     expect(host.ofType(WorkerToHostType.Log).map(m => m.message)).toEqual(['starting with 2 files'])
+    expect(host.ofType(WorkerToHostType.Progress).map(m => m.info)).toEqual([
+      { completed: 0, total: 2, unit: 'files' },
+    ])
+    expect(host.ofType(WorkerToHostType.Degradation).map(m => m.info)).toEqual([
+      { code: 'CACHE_FALLBACK', message: 'Using cached index', recoverable: true },
+    ])
     expect(host.ofType(WorkerToHostType.AgentStart).map(m => m.info.childId)).toEqual(['child-0', 'child-1'])
     expect(host.ofType(WorkerToHostType.AgentEnd).every(m => m.info.outcome === 'completed')).toBe(true)
     host.close()

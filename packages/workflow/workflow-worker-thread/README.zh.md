@@ -30,7 +30,9 @@ worker 仍提供实用的隔离：
 - `agent(prompt, { label, phase, schema, model })` 启动一个宿主侧 subagent。提供 schema 时返回结构化值，否则返回最终文本。普通子 agent 失败会产生 `null`；
 - `parallel(thunks)` 在已配置的并发限制下运行 thunk；
 - `pipeline(items, ...stages)` 在没有跨阶段屏障的情况下传递 `(previous, item, index)`；
-- `phase(title)` 和 `log(message)` 发出观察器叙述。
+- `phase(title)` 和 `log(message)` 发出观察器叙述；
+- `progress({ completed, total?, unit?, message? })` 发出结构化的非终止进度；
+- `degradation({ code, message, recoverable })` 报告质量或覆盖范围下降，但不会使运行失败。
 
 未知选项、格式错误的参数、不支持的 schema、超出上限、提供方启动失败和基础设施结果失败都属于致命工作流错误。有意不注入 timer、文件系统 API 或 Node 全局变量，但上述信任注意事项仍然适用。
 

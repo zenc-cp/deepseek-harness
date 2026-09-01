@@ -94,6 +94,28 @@ export interface WorkflowRunInfo {
   meta: WorkflowMeta
 }
 
+/** Additive progress observation. It does not determine workflow settlement. */
+export interface WorkflowProgressInfo {
+  /** Completed work units. */
+  completed: number
+  /** Total expected work units when known. */
+  total?: number
+  /** Human-readable unit label such as `items` or `files`. */
+  unit?: string
+  /** Optional concise progress narration. */
+  message?: string
+}
+
+/** Additive degraded-operation observation. It does not imply workflow failure. */
+export interface WorkflowDegradationInfo {
+  /** Stable machine-routable degradation category. */
+  code: string
+  /** Human-readable description of what degraded. */
+  message: string
+  /** Whether normal quality may be restored without restarting the workflow. */
+  recoverable: boolean
+}
+
 /** One `agent()` call's identity within a run (the `workflow/agent-start` payload). */
 export interface WorkflowAgentInfo {
   /** 1-based sequence number of this `agent()` call within the run. */

@@ -24,6 +24,7 @@ Workflow events are observe-only. They carry `WorkflowRunInfo` (`id` plus `meta`
 
 - `workflow/start` / `workflow/end` pair the run.
 - `workflow/phase` and `workflow/log` expose script narration.
+- `workflow/progress` reports completed and optional total work units; `workflow/degradation` reports recoverable or permanent quality loss while the run continues. Both are additive observations and never determine terminal status.
 - `workflow/agent-start` / `workflow/agent-end` pair each child call by `seq`; a child whose async provider start rejects emits neither.
 
 Same-process event payloads are borrowed immutable values. Every listener is independently contained: a synchronous throw or rejected returned promise is logged without starving peers or changing execution.

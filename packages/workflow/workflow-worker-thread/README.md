@@ -31,6 +31,8 @@ Inside the worker, the script receives `args` and these hooks:
 - `parallel(thunks)` runs thunks under the configured concurrency limit.
 - `pipeline(items, ...stages)` passes `(previous, item, index)` without a cross-stage barrier.
 - `phase(title)` and `log(message)` emit observer narration.
+- `progress({ completed, total?, unit?, message? })` emits structured non-terminal progress.
+- `degradation({ code, message, recoverable })` reports reduced quality or coverage without failing the run.
 
 Unknown options, malformed arguments, unsupported schemas, tripped caps, provider-start failures, and infrastructure result failures are fatal workflow errors. No timers, filesystem API, or Node globals are intentionally injected, though the trust caveat above still applies.
 

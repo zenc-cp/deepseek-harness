@@ -9,6 +9,8 @@ import { HarnessError } from '@deepseek-ai/dsh-llm'
 import type {
   WorkflowAgentEndInfo,
   WorkflowAgentInfo,
+  WorkflowDegradationInfo,
+  WorkflowProgressInfo,
   WorkflowResultInfo,
   WorkflowRunInfo,
 } from './types.ts'
@@ -19,7 +21,9 @@ export type {
   WorkflowAgentEndInfo,
   WorkflowAgentInfo,
   WorkflowAgentOutcome,
+  WorkflowDegradationInfo,
   WorkflowMeta,
+  WorkflowProgressInfo,
   WorkflowPhase,
   WorkflowResult,
   WorkflowResultInfo,
@@ -56,6 +60,22 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'workflow/log'(info: WorkflowRunInfo, message: string): void
+    /**
+     * The run reported structured progress. This is additive observer data and
+     * never determines whether the run succeeds or fails.
+     * @param info - the run's identity snapshot.
+     * @param progress - completed and optional total work units.
+     * @mode emit
+     */
+    'workflow/progress'(info: WorkflowRunInfo, progress: WorkflowProgressInfo): void
+    /**
+     * The run reported reduced quality, coverage, or freshness while continuing.
+     * This is additive observer data and never implies a terminal failure.
+     * @param info - the run's identity snapshot.
+     * @param degradation - stable category, message, and recoverability.
+     * @mode emit
+     */
+    'workflow/degradation'(info: WorkflowRunInfo, degradation: WorkflowDegradationInfo): void
     /**
      * One `agent()` call established a published child run. Paired with
      * {@link Events['workflow/agent-end']} by `agent.seq`. A call that never
@@ -95,6 +115,8 @@ export type WorkflowEventName =
   | 'workflow/start'
   | 'workflow/phase'
   | 'workflow/log'
+  | 'workflow/progress'
+  | 'workflow/degradation'
   | 'workflow/agent-start'
   | 'workflow/agent-end'
   | 'workflow/end'

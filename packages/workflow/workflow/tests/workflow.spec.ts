@@ -6,7 +6,9 @@ import WorkflowEngineDefault, {
   WorkflowRunId,
   WorkflowEngine,
 } from '../src/index.ts'
-import type { WorkflowRun, WorkflowRunInfo, WorkflowStartRequest } from '../src/index.ts'
+import type {
+  WorkflowDegradationInfo, WorkflowProgressInfo, WorkflowRun, WorkflowRunInfo, WorkflowStartRequest,
+} from '../src/index.ts'
 
 /** A minimal concrete subclass exposing the protected emit helper for tests. */
 class StubEngine extends WorkflowEngine {
@@ -67,6 +69,28 @@ describe('dsh-workflow (interface)', () => {
       [INFO, 'hello'],
       [INFO, { seq: 1, label: 'l', childId: 'c' }],
     ])
+  })
+
+  it('dispatches additive progress and degradation observations without affecting settlement', async () => {
+    const ctx = new Context()
+    await ctx.plugin(StubEngine)
+    const progress: WorkflowProgressInfo[] = []
+    const degradation: WorkflowDegradationInfo[] = []
+    ctx.on('workflow/progress', (_info, event) => { progress.push(event) })
+    ctx.on('workflow/degradation', (_info, event) => { degradation.push(event) })
+    const engine = ctx.workflowEngine as StubEngine
+
+    engine.emit('workflow/start', INFO)
+    engine.emit('workflow/progress', INFO, { completed: 2, total: 5, unit: 'items', message: 'Reviewed batch' })
+    engine.emit('workflow/degradation', INFO, {
+      code: 'PARTIAL_RESULT', message: 'One source was unavailable', recoverable: true,
+    })
+    engine.emit('workflow/end', INFO, { stopReason: 'completed', agentsStarted: 0 })
+
+    expect(progress).toEqual([{ completed: 2, total: 5, unit: 'items', message: 'Reviewed batch' }])
+    expect(degradation).toEqual([{
+      code: 'PARTIAL_RESULT', message: 'One source was unavailable', recoverable: true,
+    }])
   })
 
   it('contains an asynchronously rejected listener without starving peers', async () => {

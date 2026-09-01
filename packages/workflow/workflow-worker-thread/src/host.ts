@@ -286,6 +286,12 @@ export class WorkerRun implements WorkflowRun {
       case WorkerToHostType.Log:
         if (this.cancelReason === undefined) this.observer.log(message.message)
         break
+      case WorkerToHostType.Progress:
+        if (this.cancelReason === undefined) this.observer.progress(message.info)
+        break
+      case WorkerToHostType.Degradation:
+        if (this.cancelReason === undefined) this.observer.degradation(message.info)
+        break
       case WorkerToHostType.AgentStart:
         this.liveAgents.set(message.info.seq, message.info)
         this.observer.agentStart(message.info)

@@ -21,7 +21,9 @@ import { isFatalWorkflowError, WorkflowError } from '@deepseek-ai/dsh-workflow'
 import type {
   WorkflowAgentEndInfo,
   WorkflowAgentInfo,
+  WorkflowDegradationInfo,
   WorkflowMeta,
+  WorkflowProgressInfo,
   WorkflowResult,
 } from '@deepseek-ai/dsh-workflow'
 import { materializeFromRealm, MaterializeError, renderThrown } from './realm.ts'
@@ -31,6 +33,8 @@ import type { ChildHandle, ChildPort, WorkerLimits } from './types.ts'
 export interface ExecutionObserver {
   phase(title: string): void
   log(message: string): void
+  progress(info: WorkflowProgressInfo): void
+  degradation(info: WorkflowDegradationInfo): void
   agentStart(info: WorkflowAgentInfo): void
   agentEnd(info: WorkflowAgentEndInfo): void
 }
@@ -103,6 +107,8 @@ export class WorkflowExecution {
       pipeline: (items: unknown, ...stages: unknown[]) => this.contain(this.pipeline(items, stages)),
       phase: (title: unknown) => { this.phase(title) },
       log: (message: unknown) => { this.log(message) },
+      progress: (info: unknown) => { this.progress(info) },
+      degradation: (info: unknown) => { this.degradation(info) },
       // workerData already performed the real cross-thread structured clone.
       args,
     }
@@ -484,4 +490,45 @@ export class WorkflowExecution {
     }
     this.observer.log(message)
   }
+
+  /** The `progress(info)` hook: structured non-terminal progress to observers. */
+  private progress(info: unknown): void {
+    this.throwIfCancelled()
+    if (!isRecord(info) || !isFiniteNonNegative(info.completed)) {
+      throw new WorkflowError('progress() requires an object with finite non-negative completed', 'INVALID_ARGUMENT')
+    }
+    if (info.total !== undefined && (!isFiniteNonNegative(info.total) || info.completed > info.total)) {
+      throw new WorkflowError('progress() total must be finite, non-negative, and not below completed', 'INVALID_ARGUMENT')
+    }
+    if (info.unit !== undefined && (typeof info.unit !== 'string' || info.unit.length === 0)) {
+      throw new WorkflowError('progress() unit must be a non-empty string', 'INVALID_ARGUMENT')
+    }
+    if (info.message !== undefined && (typeof info.message !== 'string' || info.message.length === 0)) {
+      throw new WorkflowError('progress() message must be a non-empty string', 'INVALID_ARGUMENT')
+    }
+    this.observer.progress(materializeFromRealm(info, 'progress() value') as WorkflowProgressInfo)
+  }
+
+  /** The `degradation(info)` hook: structured non-terminal degraded-operation notice. */
+  private degradation(info: unknown): void {
+    this.throwIfCancelled()
+    if (!isRecord(info)
+      || typeof info.code !== 'string' || info.code.length === 0
+      || typeof info.message !== 'string' || info.message.length === 0
+      || typeof info.recoverable !== 'boolean') {
+      throw new WorkflowError(
+        'degradation() requires non-empty code and message strings plus boolean recoverable',
+        'INVALID_ARGUMENT',
+      )
+    }
+    this.observer.degradation(materializeFromRealm(info, 'degradation() value') as WorkflowDegradationInfo)
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function isFiniteNonNegative(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
 }

@@ -24,6 +24,7 @@
 
 - `workflow/start` / `workflow/end` 为运行配对；
 - `workflow/phase` 和 `workflow/log` 公开脚本叙述；
+- `workflow/progress` 报告已完成及可选的总工作量；`workflow/degradation` 报告运行继续时可恢复或永久的质量下降。两者都只是附加观察，不决定最终状态；
 - `workflow/agent-start` / `workflow/agent-end` 按 `seq` 为每次子 agent 调用配对；提供方的异步启动调用被拒绝时，该子 agent 不会发出其中任何一个事件。
 
 同进程事件 payload 是以不可变方式借用的值。每个监听器都独立隔离：同步抛出异常或返回的 promise 被拒绝时，只会记录日志，不会阻塞同级监听器或改变执行。

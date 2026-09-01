@@ -50,6 +50,8 @@ describe('workflow invariants', () => {
     ctx.emit('workflow/start', run)
     ctx.emit('workflow/phase', run, 'inspect')
     ctx.emit('workflow/log', run, 'working')
+    ctx.emit('workflow/progress', run, { completed: 1, total: 2, unit: 'items' })
+    ctx.emit('workflow/degradation', run, { code: 'FALLBACK', message: 'Using cached input', recoverable: true })
     ctx.emit('workflow/agent-start', run, agent())
     ctx.emit('workflow/agent-end', run, agentEnd())
     ctx.emit('workflow/end', run, result())
@@ -66,6 +68,16 @@ describe('workflow invariants', () => {
       .toThrow(/meta diverges/)
     const fresh = await setup()
     expect(() => { fresh.emit('workflow/log', info(), 'x') }).toThrow(/no matching workflow\/start/)
+  })
+
+  it('rejects malformed progress and degradation observations', async () => {
+    const ctx = await setup()
+    const run = info()
+    ctx.emit('workflow/start', run)
+    expect(() => { ctx.emit('workflow/progress', run, { completed: 3, total: 2, unit: 'items' }) })
+      .toThrow(/completed must not exceed total/)
+    expect(() => { ctx.emit('workflow/degradation', run, { code: '', message: 'x', recoverable: true }) })
+      .toThrow(/code and message must be non-empty/)
   })
 
   it('rejects malformed and unpaired child lifecycles', async () => {
