@@ -44,6 +44,117 @@ export type SkillResourceBase =
   | { readonly kind: 'url'; readonly url: string }
   | { readonly kind: 'opaque'; readonly description: string }
 
+/** One durable reference supporting or testing a proposed skill revision. */
+export interface SkillEvolutionEvidence {
+  readonly kind: string
+  readonly ref: string
+}
+
+/** Unevaluated proposed skill revision. No function in this package mutates the skill itself. */
+export interface SkillEvolutionCandidate {
+  readonly skill: string
+  readonly revision: string
+  readonly previousAcceptedRevision: string
+  readonly evidence: readonly SkillEvolutionEvidence[]
+}
+
+/** Explicit gate outcome produced by an external evaluator. */
+export interface SkillEvolutionEvaluation {
+  readonly evaluator: string
+  readonly score: number
+  readonly threshold: number
+  readonly passed: boolean
+}
+
+/** Immutable accepted or rejected evolution decision. */
+export interface SkillEvolutionDecision extends SkillEvolutionCandidate {
+  readonly status: 'accepted' | 'rejected'
+  readonly evaluation: SkillEvolutionEvaluation
+}
+
+/** Accepted decision whose active revision was restored to the prior accepted revision. */
+export interface RolledBackSkillEvolution extends Omit<SkillEvolutionDecision, 'status'> {
+  readonly status: 'rolled-back'
+  readonly activeRevision: string
+  readonly rollbackReason: string
+}
+
+/** Evaluate one candidate against an explicit score gate without mutating any skill source. */
+export function decideSkillEvolution(
+  candidate: SkillEvolutionCandidate,
+  evaluation: SkillEvolutionEvaluation,
+): SkillEvolutionDecision {
+  validateEvolutionCandidate(candidate)
+  validateEvolutionEvaluation(evaluation)
+  return {
+    ...candidate,
+    status: evaluation.passed && evaluation.score >= evaluation.threshold ? 'accepted' : 'rejected',
+    evaluation,
+  }
+}
+
+/** Produce an immutable rollback record for a previously accepted decision. */
+export function rollbackSkillEvolution(
+  decision: SkillEvolutionDecision,
+  reason: string,
+): RolledBackSkillEvolution {
+  if (decision.status !== 'accepted') throw new Error('skill evolution rollback requires an accepted decision')
+  if (reason.trim() === '') throw new Error('skill evolution rollback requires a reason')
+  return {
+    ...decision,
+    status: 'rolled-back',
+    activeRevision: decision.previousAcceptedRevision,
+    rollbackReason: reason,
+  }
+}
+
+function validateEvolutionCandidate(candidate: SkillEvolutionCandidate): void {
+  if (!isSkillName(candidate.skill)) throw new Error(`invalid skill evolution name "${candidate.skill}"`)
+  if (candidate.revision.trim() === '') throw new Error('skill evolution revision must be non-empty')
+  if (candidate.previousAcceptedRevision.trim() === '') {
+    throw new Error('skill evolution previousAcceptedRevision must be non-empty')
+  }
+  if (candidate.revision === candidate.previousAcceptedRevision) {
+    throw new Error('skill evolution candidate revision must differ from the previous accepted revision')
+  }
+  if (candidate.evidence.length === 0) throw new Error('skill evolution requires evidence')
+  for (const evidence of candidate.evidence) {
+    if (evidence.kind.trim() === '' || evidence.ref.trim() === '') {
+      throw new Error('skill evolution evidence kind and ref must be non-empty')
+    }
+  }
+}
+
+function validateEvolutionEvaluation(evaluation: SkillEvolutionEvaluation): void {
+  if (evaluation.evaluator.trim() === '') throw new Error('skill evolution evaluator must be non-empty')
+  if (!Number.isFinite(evaluation.score) || !Number.isFinite(evaluation.threshold)) {
+    throw new Error('skill evolution score and threshold must be finite')
+  }
+}
+
+export {
+  checkReflectPromotion,
+  extractReflectSignals,
+  fingerprintLearning,
+  mapReflectSection,
+  planReflectApply,
+  proposeReflectSkillUpdate,
+  recordReflectLearning,
+  REFLECT_CONTEXT_WINDOW,
+  REFLECT_PROMOTION_THRESHOLD,
+} from './reflect.ts'
+export type {
+  ReflectApplyPlan,
+  ReflectConfidence,
+  ReflectLedgerEntry,
+  ReflectPromotionEligibility,
+  ReflectSection,
+  ReflectSignal,
+  ReflectSignalType,
+  ReflectSkillProposal,
+  ReflectTranscriptMessage,
+} from './reflect.ts'
+
 /** Invocation controls shared by skill discovery consumers. */
 export interface SkillInvocationPolicy {
   /** Whether model-facing catalogs and loaders include this skill. */

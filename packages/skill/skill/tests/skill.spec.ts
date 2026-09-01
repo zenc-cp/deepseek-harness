@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import { bindScopeParent, createScope, scopeOf } from '@deepseek-ai/dsh-scope'
 import SkillRegistry, {
+  decideSkillEvolution,
   isModelInvocable,
   isUserInvocable,
   renderSkillContent,
+  rollbackSkillEvolution,
   type SkillCandidate,
   type SkillDefinition,
   type SkillInvocationPolicy,
@@ -12,6 +14,54 @@ import SkillRegistry, {
   type SkillProvider,
   type SkillProviderObservation,
 } from '@deepseek-ai/dsh-skill'
+
+describe('skill evolution decisions', () => {
+  const candidate = {
+    skill: 'systematic-debugging',
+    revision: 'sha256:candidate',
+    previousAcceptedRevision: 'sha256:accepted',
+    evidence: [
+      { kind: 'session', ref: 'session:test-1' },
+      { kind: 'test', ref: 'vitest:skill-evolution' },
+    ],
+  } as const
+
+  it('accepts only evaluated candidates that meet the gate', () => {
+    expect(decideSkillEvolution(candidate, {
+      evaluator: 'focused-tests', score: 0.9, threshold: 0.8, passed: true,
+    })).toEqual({
+      ...candidate,
+      status: 'accepted',
+      evaluation: { evaluator: 'focused-tests', score: 0.9, threshold: 0.8, passed: true },
+    })
+
+    expect(decideSkillEvolution(candidate, {
+      evaluator: 'focused-tests', score: 0.7, threshold: 0.8, passed: true,
+    }).status).toBe('rejected')
+  })
+
+  it('rolls an accepted decision back to its previous accepted revision', () => {
+    const accepted = decideSkillEvolution(candidate, {
+      evaluator: 'focused-tests', score: 1, threshold: 1, passed: true,
+    })
+
+    expect(rollbackSkillEvolution(accepted, 'regression in held-out task')).toEqual({
+      ...accepted,
+      status: 'rolled-back',
+      activeRevision: 'sha256:accepted',
+      rollbackReason: 'regression in held-out task',
+    })
+  })
+
+  it('rejects malformed or ungated evolution records', () => {
+    expect(() => decideSkillEvolution({ ...candidate, evidence: [] }, {
+      evaluator: 'focused-tests', score: 1, threshold: 1, passed: true,
+    })).toThrow('evidence')
+    expect(() => rollbackSkillEvolution({ ...candidate, status: 'rejected', evaluation: {
+      evaluator: 'focused-tests', score: 0, threshold: 1, passed: false,
+    } }, 'not accepted')).toThrow('accepted')
+  })
+})
 
 function memorySkill(name: string, description: string, rank: number, body = `${name} body.`): SkillCandidate {
   return {

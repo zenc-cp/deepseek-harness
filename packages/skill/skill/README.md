@@ -45,6 +45,12 @@ The registry is host+per-scope layered over [`@deepseek-ai/dsh-scope`](../../cor
 
 `isModelInvocable(skill)` and `isUserInvocable(skill)` read the matching positive field directly. `ctx.skills.get()` remains the trusted, policy-neutral loading primitive, so every user- or model-facing consumer must enforce the predicate that matches its surface before exposing or loading a skill.
 
+### Gated evolution records
+
+`decideSkillEvolution(candidate, evaluation)` creates an immutable accepted or rejected record from a proposed revision, its previous accepted revision, durable evidence references, and an explicit external evaluation gate. Acceptance requires both `passed: true` and `score >= threshold`. `rollbackSkillEvolution(decision, reason)` accepts only an accepted decision and records restoration of `previousAcceptedRevision`. These helpers are filesystem-neutral and never edit, install, register, or publish a skill; an owning workflow must separately apply an accepted revision and retain the evidence.
+
+`extractReflectSignals(messages, skillsInvoked)` scans user turns for HIGH corrections, MEDIUM contextual approvals, and LOW questions, attaching a 5-message window and a 16-hex fingerprint. Bare `yes` is not a signal. `proposeReflectSkillUpdate(signal)` and `planReflectApply(proposal, approval)` stay approval-gated and never write `SKILL.md`; even a granted preview still requires backup, YAML validation, and a lock in the owning workflow. `recordReflectLearning` / `checkReflectPromotion` count a fingerprint across opaque scope ids and mark promotion eligible only after two distinct scopes.
+
 ## Provider Contract
 
 A provider factory runs synchronously and receives one registration-scoped control. `control.signal` aborts when registration fails or is disposed; `control.invalidate()` clears completed catalogs only while that exact registration remains active, so late callbacks cannot affect a replacement with the same name. Immutable providers may ignore the control. Remote setup, authentication, and discovery belong in the provider's awaited `list(options)` call. An array return is shorthand for complete discovery; a provider that collected usable candidates but could not establish an authoritative observation returns `{ candidates, complete: false }`. Provider objects, lookup options, candidates, and definitions are borrowed readonly rather than cloned or rebound. Providers should honor `options.signal`; the registry also stops awaiting uncooperative discovery or loading after cancellation.

@@ -45,6 +45,12 @@
 
 `isModelInvocable(skill)` 和 `isUserInvocable(skill)` 分别直接读取对应的正向字段。`ctx.skills.get()` 仍是受信且与策略无关的加载原语，因此每个面向用户或模型的消费方都必须先执行与自身接口匹配的判定，再暴露或加载 skill。
 
+### 有门控的演进记录
+
+`decideSkillEvolution(candidate, evaluation)` 根据候选修订、前一个已接受修订、持久证据引用和显式外部评估门控，创建不可变的接受或拒绝记录。只有 `passed: true` 且 `score >= threshold` 时才会接受。`rollbackSkillEvolution(decision, reason)` 只接受已通过的决策，并记录恢复到 `previousAcceptedRevision`。这些帮助函数与文件系统无关，也不会编辑、安装、注册或发布 skill；所属工作流必须另行应用已接受的修订并保留证据。
+
+`extractReflectSignals(messages, skillsInvoked)` 扫描用户回合中的 HIGH 纠正、MEDIUM 带上下文认可和 LOW 疑问，并附带 5 条消息窗口和 16 位十六进制指纹。单独的 `yes` 不是信号。`proposeReflectSkillUpdate(signal)` 和 `planReflectApply(proposal, approval)` 保持审批门控，并且从不写入 `SKILL.md`；即使已授予预览，所属工作流仍须备份、校验 YAML 并加锁。`recordReflectLearning` / `checkReflectPromotion` 按不透明 scope id 统计指纹，只有在两个不同 scope 中出现后才具备晋升资格。
+
 ## 提供方约定
 
 提供方工厂同步运行，并接收一项注册作用域内的控制能力。注册失败或释放时，`control.signal` 会中止；仅当该精确注册仍处于活动状态时，`control.invalidate()` 才会清除已完成目录，因此延迟回调无法影响同名替代项。不可变提供方可以忽略该控制能力。远程设置、身份验证和发现应在提供方的 `list(options)` 调用中完成，该调用会被等待。返回数组是完整发现的简写形式；若提供方已收集到可用候选项，却无法建立权威观测，则返回 `{ candidates, complete: false }`。提供方对象、查找选项、候选项和定义都以只读方式借用，而不是克隆或重新绑定。提供方应遵守 `options.signal`；取消后，注册表也会停止等待不协作的发现或加载。
