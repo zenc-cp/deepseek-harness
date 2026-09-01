@@ -651,6 +651,15 @@
         "tests/**/*.ts"
       ]
     },
+    "packages/subagent/subagent-agencycli": {
+      "entry": [
+        "tests/**/*.spec.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ]
+    },
     "packages/fs/tool-fs": {
       "entry": [
         "tests/**/*.spec.ts",
