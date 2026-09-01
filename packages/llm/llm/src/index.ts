@@ -42,6 +42,8 @@ export * from './retry-policy.ts'
 export { BlockAssembler } from './assembler.ts'
 export { callConfigEquals, deepFreeze, isAgentLoopRequest, markAgentLoopRequest } from './call-config.ts'
 export type { LlmCallConfig, LlmCallConfigAdapterDefaults } from './call-config.ts'
+export { accumulateLabelProbe, classifyStreamingLabel, labelProtocolRepairPrompt } from './label-protocol.ts'
+export type { LabelDetection, LabelDetectionResult } from './label-protocol.ts'
 
 declare module '@deepseek-ai/cordis' {
   interface Context {

@@ -185,6 +185,8 @@ declare module '@deepseek-ai/cordis' {
 }
 
 export { DEFAULT_MAX_PARALLEL_TOOL_CALLS }
+export { installLabelLoop } from './label-loop.ts'
+export type { LabelLoopOptions, LabelProtocolFailure, LabelVocabulary } from './label-loop.ts'
 
 /**
  * One launcher-selected session identity for a configured agent. `resume`
