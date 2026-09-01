@@ -2,7 +2,10 @@
  * Versioned immutable snapshot for one DSH turn/step (graph-architect slice 1).
  *
  * This is not `SESSION_FORMAT_VERSION` and not session-checkpoint-policy.
- * The live driver (`kick` / `turn` / `preStep` / `step`) is not wired to it.
+ * `applyPreStepDecision` is the first pure node. `routePreStep` is the first
+ * declared router (`PRE_STEP_ROUTER_TARGETS`). `recordNodeVisit` caps
+ * `apply-pre-step`. `turn()` carries visits across iterations. `kick` /
+ * `preStep` / `step` are not rewritten.
  *
  * Field mapping from the current loop:
  * - `phaseKind`, `wakeRequested`, `abortCause` <- mutable `Phase` (`AbortController` stays live)
@@ -11,15 +14,16 @@
  * - `requestError` <- `agent/request-error` retry|throw
  * - `stepEnd` / `turnEnd` <- `StepEndReason` / `TurnEndReason`
  * - `route` / `requestHeaderLogged` / `surfaceGeneration` <- `buildRequest` locals
+ * - `visits` <- per-node graph visit counts (`apply-pre-step` this slice)
  * - `failure` <- routable error facts (slice 8 later)
  *
  * @module dsh-agent-loop/turn-step-state
  */
 
-import type { InboxTarget } from '@deepseek-ai/dsh-agent'
+import type { InboxTarget, PreStepDecision } from '@deepseek-ai/dsh-agent'
 import { MessageId, ProviderRequestId, type LlmFailure, type UserMessage } from '@deepseek-ai/dsh-llm'
 import { SessionId, type AgentCancelCause, type TurnEndReason } from '@deepseek-ai/dsh-session'
-import { deepFreeze, snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
+import { assertNever, deepFreeze, snapshotJsonValue } from '@deepseek-ai/dsh-util-values'
 
 /** Monotonic State schema version. Independent of the session log format. */
 export const TURN_STEP_STATE_VERSION = 1 as const
@@ -47,6 +51,23 @@ export class TurnStepStateInvalidError extends Error {
   }
 }
 
+/** A node visit exceeded {@link TURN_STEP_VISIT_CAPS}. Early error, not a routable `failure`. */
+export class TurnStepVisitCapError extends Error {
+  /**
+   * @param node - declared node id that exceeded its cap.
+   * @param cap - maximum allowed visits for that node.
+   * @param found - visit count after the increment that overflowed.
+   */
+  constructor(
+    readonly node: TurnStepNodeId,
+    readonly cap: number,
+    readonly found: number,
+  ) {
+    super(`turn/step visit cap exceeded: node ${node} cap ${cap} found ${found}`)
+    this.name = 'TurnStepVisitCapError'
+  }
+}
+
 const STATE_KEYS = [
   'schemaVersion',
   'sessionId',
@@ -67,6 +88,7 @@ const STATE_KEYS = [
   'surfaceGeneration',
   'requestHeaderLogged',
   'failure',
+  'visits',
 ] as const
 
 const PHASE_KINDS = ['idle', 'maintenance', 'running'] as const
@@ -86,6 +108,26 @@ export type TurnStepPhaseKind = (typeof PHASE_KINDS)[number]
 
 /** `preStep` waterfall outcome, plus `pending` before that node runs. */
 export type TurnStepPreStepKind = (typeof PRE_STEP_KINDS)[number]
+
+/** Explicit `routePreStep` destinations. Empty-claimed shortcuts stay in `turn()`. */
+export const PRE_STEP_ROUTER_TARGETS = ['block-turn', 'enter-step'] as const
+
+/** One destination from {@link PRE_STEP_ROUTER_TARGETS}. */
+export type PreStepRouterTarget = (typeof PRE_STEP_ROUTER_TARGETS)[number]
+
+/** Declared graph nodes that may carry a visit cap. */
+export const TURN_STEP_NODES = ['apply-pre-step'] as const
+
+/** One id from {@link TURN_STEP_NODES}. */
+export type TurnStepNodeId = (typeof TURN_STEP_NODES)[number]
+
+/** Per-node visit budgets. Graph safety rail, not a product turn budget. */
+export const TURN_STEP_VISIT_CAPS: { readonly [K in TurnStepNodeId]: number } = {
+  'apply-pre-step': 256,
+}
+
+/** Frozen per-node visit counts. Exact keys = {@link TURN_STEP_NODES}. */
+export type TurnStepVisits = { readonly [K in TurnStepNodeId]: number }
 
 /** `agent/request-error` action, plus `none` when no request failed. */
 export type TurnStepRequestErrorKind = (typeof REQUEST_ERROR_KINDS)[number]
@@ -120,6 +162,7 @@ export interface TurnStepState {
   readonly surfaceGeneration: number | null
   readonly requestHeaderLogged: boolean
   readonly failure: { readonly message: string; readonly code: string } | null
+  readonly visits: TurnStepVisits
 }
 
 /** Fields `evolveTurnStepState` may replace. `schemaVersion` stays 1. */
@@ -164,6 +207,66 @@ export function evolveTurnStepState(state: TurnStepState, patch: TurnStepStatePa
   })
 }
 
+/**
+ * First pure node: write a pre-step enter/reject decision onto State.
+ * Claiming, prompt assembly, and the waterfall stay in the driver.
+ * @param state - frozen snapshot from before the decision is applied.
+ * @param decision - `agent/pre-step` enter or reject.
+ * @returns a new frozen snapshot.
+ */
+export function applyPreStepDecision(state: TurnStepState, decision: PreStepDecision): TurnStepState {
+  if (decision.kind === 'reject') {
+    return evolveTurnStepState(state, {
+      preStep: 'reject',
+      claimed: [],
+      startsRequestSeries: false,
+    })
+  }
+  return evolveTurnStepState(state, {
+    preStep: 'enter',
+    claimed: decision.messages,
+    startsRequestSeries: decision.startsRequestSeries === true,
+  })
+}
+
+/**
+ * First declared router: map frozen `preStep` onto explicit targets.
+ * Pending State is invalid here; apply a decision first.
+ * @param state - frozen snapshot after {@link applyPreStepDecision}.
+ * @returns `block-turn` or `enter-step`.
+ */
+export function routePreStep(state: TurnStepState): PreStepRouterTarget {
+  switch (state.preStep) {
+    case 'pending':
+      throw new TurnStepStateInvalidError('preStep is pending; apply a decision before routing')
+    case 'reject':
+      return 'block-turn'
+    case 'enter':
+      return 'enter-step'
+    /* v8 ignore next -- closed-union exhaustiveness guard */
+    default:
+      assertNever(state.preStep, 'pre-step router')
+  }
+}
+
+/**
+ * Increment one node's visit count. Throws {@link TurnStepVisitCapError} when
+ * the new count exceeds that node's cap. Does not write `failure`.
+ * @param state - frozen snapshot whose `visits` already carry prior counts.
+ * @param node - declared node being entered.
+ * @returns a new frozen snapshot with the incremented count.
+ */
+export function recordNodeVisit(state: TurnStepState, node: TurnStepNodeId): TurnStepState {
+  const next = state.visits[node] + 1
+  const evolved = evolveTurnStepState(state, {
+    visits: { ...state.visits, [node]: next },
+  })
+  if (next > TURN_STEP_VISIT_CAPS[node]) {
+    throw new TurnStepVisitCapError(node, TURN_STEP_VISIT_CAPS[node], next)
+  }
+  return evolved
+}
+
 function foundVersion(value: unknown): unknown {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
   return (value as { schemaVersion?: unknown }).schemaVersion
@@ -194,6 +297,7 @@ function normalizeState(value: unknown): TurnStepState {
       : nonNegativeInt(record.surfaceGeneration, 'surfaceGeneration'),
     requestHeaderLogged: booleanOf(record.requestHeaderLogged, 'requestHeaderLogged'),
     failure: record.failure === null ? null : parseExactFailure(record.failure, 'failure'),
+    visits: parseVisits(record.visits),
   }
 }
 
@@ -272,6 +376,14 @@ function parseRoute(value: unknown): TurnStepState['route'] {
   return {
     provider: stringOf(record.provider, 'route.provider'),
     model: stringOf(record.model, 'route.model'),
+  }
+}
+
+function parseVisits(value: unknown): TurnStepVisits {
+  const record = asRecord(value, 'visits')
+  exactKeys(record, TURN_STEP_NODES, 'visits')
+  return {
+    'apply-pre-step': nonNegativeInt(record['apply-pre-step'], 'visits.apply-pre-step'),
   }
 }
 

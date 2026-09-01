@@ -194,7 +194,7 @@ const handle = await ctx.agents.create({
 <details>
 <summary>维护者的工作上下文——点击展开</summary>
 
-`TurnStepState`（`src/turn-step-state.ts`）是单个 turn/step 的版本化冻结快照。它不是 `SESSION_FORMAT_VERSION`，也不是 session-checkpoint-policy。驱动器（`kick` / `turn` / `preStep` / `step`）尚未接入。
+`TurnStepState`（`src/turn-step-state.ts`）是单个 turn/step 的版本化冻结快照。它不是 `SESSION_FORMAT_VERSION`，也不是 session-checkpoint-policy。`applyPreStepDecision` 是第一个纯节点。`routePreStep` 是第一个声明式路由器（`PRE_STEP_ROUTER_TARGETS`：`block-turn`、`enter-step`）；`turn()` 按这些目标切换。`recordNodeVisit` 将 `apply-pre-step` 限制为 `TURN_STEP_VISIT_CAPS`（256）；这是图安全上限，不是产品轮次预算，且 `step()` 重试仍无上限。空 claimed 快捷路径仍埋在 `turn()` 中。`kick` / `preStep` / `step` 未重写。
 
 当前可变 `Phase`、Inbox 队列、`PreparedStep`、`requestHeaderLogged` 与 `requestSurfaceGeneration` 对应的字段见该模块。
 

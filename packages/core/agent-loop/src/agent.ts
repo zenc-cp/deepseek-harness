@@ -24,7 +24,7 @@ import {
   errorChain,
   markAgentLoopRequest,
 } from '@deepseek-ai/dsh-llm'
-import { deepFreeze } from '@deepseek-ai/dsh-util-values'
+import { assertNever, deepFreeze } from '@deepseek-ai/dsh-util-values'
 import type { Scope } from '@deepseek-ai/dsh-scope'
 import { createScope } from '@deepseek-ai/dsh-scope'
 import type { EpochHeader, RequestContext, Session, SessionId, TurnEndReason, UserMessage } from '@deepseek-ai/dsh-session'
@@ -35,6 +35,15 @@ import type {} from '@deepseek-ai/dsh-session-projection'
 import type { Context } from '@deepseek-ai/cordis'
 import { RuntimeContextProjection } from './runtime-context.ts'
 import { executeToolCalls } from './tool-calls.ts'
+import {
+  TURN_STEP_STATE_VERSION,
+  applyPreStepDecision,
+  evolveTurnStepState,
+  freezeTurnStepState,
+  recordNodeVisit,
+  routePreStep,
+  type TurnStepState,
+} from './turn-step-state.ts'
 
 type Phase =
   | { kind: 'idle'; lastTurn: number }
@@ -251,6 +260,44 @@ export class ReactLoopAgent implements Agent {
     return decision.kind === 'reject' ? decision : { ...decision, assembly }
   }
 
+  /**
+   * Frozen turn/step snapshot after inbox claim, before the pre-step decision
+   * is written. Live AbortController and PromptAssembly stay off State.
+   */
+  private captureTurnStepState(turn: number, step: number, claimTarget: InboxTarget): TurnStepState {
+    /* v8 ignore next -- turn() establishes the running phase before capture */
+    if (this.phase.kind !== 'running') throw new Error(`agent "${this.id}": turn/step State capture outside running phase`)
+    const phase = this.phase
+    return freezeTurnStepState({
+      schemaVersion: TURN_STEP_STATE_VERSION,
+      sessionId: this.session.id,
+      turn,
+      step,
+      phaseKind: 'running',
+      wakeRequested: phase.wakeRequested,
+      abortCause: null,
+      claimTarget,
+      inbox: {
+        nextTurn: [...this.inbox.nextTurn],
+        nextStep: [...this.inbox.nextStep],
+      },
+      claimed: [],
+      preStep: 'pending',
+      startsRequestSeries: false,
+      requestError: 'none',
+      stepEnd: null,
+      turnEnd: null,
+      route: {
+        provider: this.options.provider ?? '',
+        model: this.options.model ?? '',
+      },
+      surfaceGeneration: this.requestSurfaceGeneration ?? null,
+      requestHeaderLogged: this.requestHeaderLogged,
+      failure: null,
+      visits: { 'apply-pre-step': 0 },
+    })
+  }
+
   /** Open one turn before claiming its first proposed step. */
   private async turn(): Promise<boolean> {
     if (this.phase.kind !== 'running') {
@@ -268,19 +315,35 @@ export class ReactLoopAgent implements Agent {
     phase.turn = turn
     let turnEnds: TurnEndReason | null = null
     let target: InboxTarget = 'next-turn'
+    let priorVisits: TurnStepState['visits'] = { 'apply-pre-step': 0 }
     try {
       while (true) {
         signal.throwIfAborted()
         const step = phase.step + 1
         const decision = await this.preStep(target, { turn, step })
-        if (decision.kind === 'reject') {
-          turnEnds = { kind: 'blocked' }
-          return false
+        const counted = recordNodeVisit(
+          evolveTurnStepState(this.captureTurnStepState(turn, step, target), { visits: priorVisits }),
+          'apply-pre-step',
+        )
+        const state = applyPreStepDecision(counted, decision)
+        priorVisits = state.visits
+        const route = routePreStep(state)
+        switch (route) {
+          case 'block-turn':
+            turnEnds = { kind: 'blocked' }
+            return false
+          case 'enter-step':
+            break
+          /* v8 ignore next -- closed-union exhaustiveness guard */
+          default:
+            assertNever(route, 'pre-step router')
         }
-        if (turnEnds && decision.messages.length === 0) break
+        /* v8 ignore next -- applyPreStepDecision copies decision.kind onto preStep */
+        if (decision.kind === 'reject') this.throwError(new Error(`agent "${this.id}": pre-step State diverged from decision`))
+        if (turnEnds && state.claimed.length === 0) break
         // A removed waking message or an enter decision rewritten to empty
         // still owns the initial turn boundary, but it spends no model call.
-        if (phase.step === 0 && decision.messages.length === 0) {
+        if (phase.step === 0 && state.claimed.length === 0) {
           turnEnds = { kind: 'completed' }
           return false
         }
@@ -288,12 +351,12 @@ export class ReactLoopAgent implements Agent {
         this.session.append('step/start', { turn, step })
         phase.step = step
         try {
-          for (const message of decision.messages) {
+          for (const message of state.claimed) {
             this.session.append('user/message', message, { surfaceOp: 'append' })
           }
           // max-tokens is sticky: once any step hits the ceiling, later steps
           // that complete normally must not downgrade the turn outcome.
-          const stepEnd = await this.step(decision.assembly, decision.startsRequestSeries === true)
+          const stepEnd = await this.step(decision.assembly, state.startsRequestSeries)
           // max-tokens stays sticky: a later completed step must not
           // downgrade the turn outcome.
           if (turnEnds === null || turnEnds.kind !== 'max-tokens') turnEnds = stepEnd

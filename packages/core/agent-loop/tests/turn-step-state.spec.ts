@@ -5,9 +5,15 @@ import {
   TURN_STEP_STATE_VERSION,
   TurnStepStateInvalidError,
   TurnStepStateVersionError,
+  PRE_STEP_ROUTER_TARGETS,
+  TURN_STEP_VISIT_CAPS,
+  TurnStepVisitCapError,
+  applyPreStepDecision,
   evolveTurnStepState,
   freezeTurnStepState,
   parseTurnStepState,
+  recordNodeVisit,
+  routePreStep,
   type TurnStepState,
 } from '../src/turn-step-state.ts'
 
@@ -41,6 +47,7 @@ function sampleState(overrides: Record<string, unknown> = {}): TurnStepState {
     surfaceGeneration: 0,
     requestHeaderLogged: true,
     failure: null,
+    visits: { 'apply-pre-step': 0 },
     ...overrides,
   } as TurnStepState
 }
@@ -134,6 +141,10 @@ describe('turn/step State schema', () => {
     const golden = jsonOf(freezeTurnStepState(sampleState()))
     const invalid: unknown[] = [
       { ...golden, extra: true },
+      { ...golden, visits: { 'apply-pre-step': 0, extra: 1 } },
+      { ...golden, visits: { 'apply-pre-step': -1 } },
+      { ...golden, visits: {} },
+      { ...golden, visits: [] },
       { ...golden, phaseKind: 'sleeping' },
       { ...golden, turnEnd: { kind: 'plugin-custom' } },
       { ...golden, sessionId: '' },
@@ -219,6 +230,107 @@ describe('turn/step State schema', () => {
       requestError: 'throw',
       abortCause: { kind: 'parent' },
     }).phaseKind).toBe('maintenance')
+  })
+
+  it('applyPreStepDecision writes enter/reject onto the same frozen State type', () => {
+    const pending = freezeTurnStepState(sampleState({
+      preStep: 'pending',
+      claimed: [],
+      startsRequestSeries: false,
+    }))
+    const entered = applyPreStepDecision(pending, {
+      kind: 'enter',
+      messages: [createUserMessage({
+        content: [{ type: 'text', text: 'go' }],
+        source: { kind: 'user' },
+      })],
+      startsRequestSeries: true,
+    })
+    expect(entered.preStep).toBe('enter')
+    expect(entered.startsRequestSeries).toBe(true)
+    expect(entered.claimed).toHaveLength(1)
+    expect(entered.claimed[0]?.content).toEqual([{ type: 'text', text: 'go' }])
+    expect(pending.preStep).toBe('pending')
+    expect(pending.claimed).toEqual([])
+
+    const enteredPlain = applyPreStepDecision(pending, {
+      kind: 'enter',
+      messages: [],
+    })
+    expect(enteredPlain.startsRequestSeries).toBe(false)
+    expect(enteredPlain.claimed).toEqual([])
+
+    const rejected = applyPreStepDecision(entered, { kind: 'reject' })
+    expect(rejected.preStep).toBe('reject')
+    expect(rejected.claimed).toEqual([])
+    expect(rejected.startsRequestSeries).toBe(false)
+    expect(entered.preStep).toBe('enter')
+  })
+
+  it('routePreStep is a declared router with explicit targets, not a buried if', () => {
+    expect(PRE_STEP_ROUTER_TARGETS).toEqual(['block-turn', 'enter-step'])
+
+    const pending = freezeTurnStepState(sampleState({
+      preStep: 'pending',
+      claimed: [],
+      startsRequestSeries: false,
+    }))
+    expect(() => routePreStep(pending)).toThrow(TurnStepStateInvalidError)
+    expect(() => routePreStep(pending)).toThrow(/preStep is pending/)
+
+    const rejected = applyPreStepDecision(pending, { kind: 'reject' })
+    expect(routePreStep(rejected)).toBe('block-turn')
+
+    const entered = applyPreStepDecision(pending, {
+      kind: 'enter',
+      messages: [createUserMessage({
+        content: [{ type: 'text', text: 'go' }],
+        source: { kind: 'user' },
+      })],
+      startsRequestSeries: true,
+    })
+    expect(routePreStep(entered)).toBe('enter-step')
+  })
+
+  it('recordNodeVisit caps apply-pre-step and carries counts across a fresh snapshot', () => {
+    expect(TURN_STEP_VISIT_CAPS).toEqual({ 'apply-pre-step': 256 })
+
+    const zero = freezeTurnStepState(sampleState({
+      visits: { 'apply-pre-step': 0 },
+    }))
+    const one = recordNodeVisit(zero, 'apply-pre-step')
+    expect(one.visits['apply-pre-step']).toBe(1)
+    expect(one).not.toBe(zero)
+    expect(zero.visits['apply-pre-step']).toBe(0)
+
+    const two = recordNodeVisit(one, 'apply-pre-step')
+    expect(two.visits['apply-pre-step']).toBe(2)
+
+    const fresh = freezeTurnStepState(sampleState({
+      visits: { 'apply-pre-step': 0 },
+      step: 2,
+    }))
+    const carried = recordNodeVisit(
+      evolveTurnStepState(fresh, { visits: two.visits }),
+      'apply-pre-step',
+    )
+    expect(carried.visits['apply-pre-step']).toBe(3)
+    expect(carried.step).toBe(2)
+    expect(fresh.visits['apply-pre-step']).toBe(0)
+
+    const atCap = freezeTurnStepState(sampleState({
+      visits: { 'apply-pre-step': 256 },
+    }))
+    const overflow = (() => {
+      try {
+        recordNodeVisit(atCap, 'apply-pre-step')
+      } catch (error) {
+        return error
+      }
+    })()
+    expect(overflow).toBeInstanceOf(TurnStepVisitCapError)
+    expect(overflow).toMatchObject({ node: 'apply-pre-step', cap: 256, found: 257 })
+    expect(atCap.visits['apply-pre-step']).toBe(256)
   })
 })
 

@@ -194,7 +194,7 @@ These limits define when the loop needs special care. They are current package c
 <details>
 <summary>Working context for maintainers — click to expand</summary>
 
-`TurnStepState` (`src/turn-step-state.ts`) is the versioned frozen snapshot for one turn/step. It is not `SESSION_FORMAT_VERSION` and not session-checkpoint-policy. The driver (`kick` / `turn` / `preStep` / `step`) is not wired to it.
+`TurnStepState` (`src/turn-step-state.ts`) is the versioned frozen snapshot for one turn/step. It is not `SESSION_FORMAT_VERSION` and not session-checkpoint-policy. `applyPreStepDecision` is the first pure node. `routePreStep` is the first declared router (`PRE_STEP_ROUTER_TARGETS`: `block-turn`, `enter-step`); `turn()` switches on those targets. `recordNodeVisit` caps `apply-pre-step` at `TURN_STEP_VISIT_CAPS` (256); that is a graph rail, not a product turn budget, and `step()` retry stays uncapped. Empty-claimed shortcuts stay buried. `kick` / `preStep` / `step` are not rewritten.
 
 Field mapping from the live `Phase`, inbox queues, `PreparedStep`, `requestHeaderLogged`, and `requestSurfaceGeneration` lives in that module.
 
