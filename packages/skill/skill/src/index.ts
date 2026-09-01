@@ -154,6 +154,16 @@ export type {
   ReflectSkillProposal,
   ReflectTranscriptMessage,
 } from './reflect.ts'
+export {
+  auditSkillAuthoring,
+  COMPLEX_SKILL_PHASE_FIELDS,
+  draftComplexSkillTemplate,
+} from './authoring.ts'
+export type {
+  ComplexSkillPhaseField,
+  SkillAuthoringAudit,
+  SkillAuthoringPhaseAudit,
+} from './authoring.ts'
 
 /** Invocation controls shared by skill discovery consumers. */
 export interface SkillInvocationPolicy {
