@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { createUserMessage } from '@deepseek-ai/dsh-llm'
-import { SessionId } from '@deepseek-ai/dsh-session'
+import { createUserMessage, ProviderRequestId } from '@deepseek-ai/dsh-llm'
+import { SessionId, type TurnEndReason } from '@deepseek-ai/dsh-session'
 import { TOOL_CALL_JOIN_POLICY } from '../src/tool-calls.ts'
 import {
   TURN_STEP_STATE_VERSION,
@@ -229,7 +229,7 @@ describe('turn/step State schema', () => {
     expect(frozen.preStep).toBe('reject')
     expect(frozen.stepEnd).toEqual({ kind: 'completed' })
 
-    const kinds = [
+    const kinds: readonly TurnEndReason[] = [
       { kind: 'completed' },
       { kind: 'blocked' },
       { kind: 'max-tokens' },
@@ -240,7 +240,7 @@ describe('turn/step State schema', () => {
       { kind: 'aborted', reason: { kind: 'hook', reason: 'policy' } },
       { kind: 'error', error: { message: 'x', code: 'Y', status: 429 } },
       { kind: 'error', error: { message: 'x', code: 'Y', providerRetryAfterMs: 10 } },
-      { kind: 'error', error: { message: 'x', code: 'Y', requestId: 'req-1' } },
+      { kind: 'error', error: { message: 'x', code: 'Y', requestId: ProviderRequestId('req-1') } },
     ]
     for (const turnEnd of kinds) {
       expect(evolveTurnStepState(frozen, { turnEnd }).turnEnd).toEqual(turnEnd)
@@ -657,6 +657,7 @@ describe('turn/step State schema', () => {
     const enterCheckpoint = checkpointAfterNode(entered, 'apply-pre-step')
     const beforeEnter = JSON.stringify(enterCheckpoint.state)
     const resumedEnter = resumeTurnStep(enterCheckpoint)
+    expect(resumedEnter.node).toBe('apply-pre-step')
     expect(resumedEnter.route).toBe('enter-step')
     expect(resumedEnter.state.preStep).toBe('enter')
     expect(resumedEnter.state.claimed).toEqual(entered.claimed)
@@ -675,6 +676,7 @@ describe('turn/step State schema', () => {
 
     const outcome = applyStepOutcome(entered, { kind: 'completed' }, entered.inbox)
     const resumedOutcome = resumeTurnStep(checkpointAfterNode(outcome, 'apply-step-outcome'))
+    expect(resumedOutcome.node).toBe('apply-step-outcome')
     expect(resumedOutcome.route).toBe('finish-turn')
     expect(resumedOutcome.state.stepEnd).toEqual({ kind: 'completed' })
 
@@ -823,7 +825,7 @@ describe('turn/step State schema', () => {
     expect(traceAfterNode(pre, 5, 5).durationMs).toBe(0)
     expect(traceAfterNode(pre, 5, 5).node).toBe('apply-pre-step')
 
-    const invalid: unknown[] = [
+    const invalid: ReadonlyArray<readonly [number, number]> = [
       [Number.NaN, 2],
       [1, Number.POSITIVE_INFINITY],
       [-1, 2],
@@ -832,7 +834,7 @@ describe('turn/step State schema', () => {
       [1, 2.5],
     ]
     for (const [startedAt, finishedAt] of invalid) {
-      expect(() => traceAfterNode(checkpoint, startedAt as number, finishedAt as number))
+      expect(() => traceAfterNode(checkpoint, startedAt, finishedAt))
         .toThrow(TurnStepTraceInvalidError)
     }
   })

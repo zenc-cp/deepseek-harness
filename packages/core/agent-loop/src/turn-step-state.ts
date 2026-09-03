@@ -330,10 +330,17 @@ export interface TurnStepTraceEntry {
 }
 
 /** Load a checkpoint and re-run cheap routing. Does not re-run a node body. */
-export interface TurnStepResume {
-  readonly state: TurnStepState
-  readonly route: PreStepRouterTarget | StepOutcomeRouterTarget
-}
+export type TurnStepResume =
+  | {
+    readonly state: TurnStepState
+    readonly node: 'apply-pre-step'
+    readonly route: PreStepRouterTarget
+  }
+  | {
+    readonly state: TurnStepState
+    readonly node: 'apply-step-outcome'
+    readonly route: StepOutcomeRouterTarget
+  }
 
 /**
  * Clone and deep-freeze a v2 snapshot. Rejects functions, live handles, and
@@ -507,12 +514,16 @@ export function routePreStep(state: TurnStepState): PreStepRouterTarget {
  * @param state - frozen snapshot the node just returned.
  * @param node - declared node that completed.
  */
-export function checkpointAfterNode(state: TurnStepState, node: TurnStepNodeId): TurnStepCheckpoint {
-  return parseTurnStepCheckpoint({
+export function checkpointAfterNode<N extends TurnStepNodeId>(
+  state: TurnStepState,
+  node: N,
+): TurnStepCheckpoint & { readonly node: N } {
+  const parsed = parseTurnStepCheckpoint({
     schemaVersion: TURN_STEP_STATE_VERSION,
     node,
     state,
   })
+  return deepFreeze({ ...parsed, node })
 }
 
 /**
@@ -576,13 +587,26 @@ export function parseTurnStepCheckpoint(value: unknown): TurnStepCheckpoint {
  * {@link applyPreStepDecision}. Not `agents.resume`.
  * @param checkpoint - frozen or JSON {@link TurnStepCheckpoint}.
  */
+export function resumeTurnStep(
+  checkpoint: TurnStepCheckpoint & { readonly node: 'apply-pre-step' },
+): Extract<TurnStepResume, { readonly node: 'apply-pre-step' }>
+export function resumeTurnStep(
+  checkpoint: TurnStepCheckpoint & { readonly node: 'apply-step-outcome' },
+): Extract<TurnStepResume, { readonly node: 'apply-step-outcome' }>
+export function resumeTurnStep(checkpoint: unknown): TurnStepResume
 export function resumeTurnStep(checkpoint: unknown): TurnStepResume {
   const parsed = parseTurnStepCheckpoint(checkpoint)
+  if (parsed.node === 'apply-pre-step') {
+    return deepFreeze({
+      state: parsed.state,
+      node: 'apply-pre-step' as const,
+      route: routePreStep(parsed.state),
+    })
+  }
   return deepFreeze({
     state: parsed.state,
-    route: parsed.node === 'apply-pre-step'
-      ? routePreStep(parsed.state)
-      : routeStepOutcome(parsed.state),
+    node: 'apply-step-outcome' as const,
+    route: routeStepOutcome(parsed.state),
   })
 }
 
