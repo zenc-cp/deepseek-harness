@@ -8,6 +8,7 @@ import type { LlmFailure, ResolvedRetryPolicy } from '@deepseek-ai/dsh-llm'
 import SessionStore, { SessionId } from '@deepseek-ai/dsh-session'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
+import { ReactLoopAgent } from '../src/agent.ts'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
 
 async function harness(adapter: MockAdapter): Promise<Context> {
@@ -100,6 +101,8 @@ describe('agent/request-error', () => {
     expect(statuses).toEqual(['running', 'idle'])
     expect(agent.session.events.flatMap(event =>
       event.type === 'request/header' ? [event.data.reason] : [])).toEqual(['initial'])
+    expect((agent as ReactLoopAgent).nodeTrace.map(entry => entry.node))
+      .toEqual(['apply-pre-step', 'apply-step-outcome'])
   })
 
   it('lets cancellation win over a retry action', async () => {

@@ -12,6 +12,8 @@ import LlmRuntime from '@deepseek-ai/dsh-llm'
 import ToolRuntime, { defineContentToolFixture, TOOL_ABORTED_BEFORE_DISPATCH, TOOL_RUNTIME_SCHEDULER, type PostToolDecision, type PreToolDecision } from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
 import AgentLoop, { DEFAULT_MAX_PARALLEL_TOOL_CALLS } from '@deepseek-ai/dsh-agent-loop'
+import { executeToolCalls } from '../src/tool-calls.ts'
+import { ReactLoopAgent } from '../src/agent.ts'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
 import { MockAdapter, textResponse } from './mock-adapter.ts'
 import { CodeRuntime } from '@deepseek-ai/dsh-code-runtime'
@@ -463,6 +465,30 @@ describe('tool-call scheduler: ordered middleware and additional contexts', () =
 })
 
 describe('tool-call scheduler: abort handling', () => {
+  it('returns failure null after aborting unstarted calls', async () => {
+    const ctx = await harness(new MockAdapter([]), 2)
+    ctx.tools.register(gatedParallelTool('p').tool)
+    const agent = ctx.agentLoop.create(SessionId('join-abort-return'), { provider: 'mock', model: 'mock' })
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('step/start', { turn: 1, step: 1 })
+    const abort = new AbortController()
+    abort.abort()
+    const outcome = await ctx.agents.withInitiator(agent, () => executeToolCalls(
+      ctx,
+      1,
+      1,
+      [
+        { type: 'tool-call', id: ToolCallId('c1'), name: 'p', arguments: JSON.stringify({ id: '1' }) },
+        { type: 'tool-call', id: ToolCallId('c2'), name: 'p', arguments: JSON.stringify({ id: '2' }) },
+      ],
+      abort.signal,
+      () => {},
+    ))
+    expect(outcome).toEqual({ concluded: false, failure: null })
+    expect(events(agent).filter(event => event.type === 'tool/result').map(event => event.data.error?.code))
+      .toEqual([TOOL_ABORTED_BEFORE_DISPATCH, TOOL_ABORTED_BEFORE_DISPATCH])
+  })
+
   it('starts no calls when the signal is already aborted before a parallel group', async () => {
     const adapter = new MockAdapter([
       multiCall([{ id: 'c1', name: 'p', args: { id: '1' } }, { id: 'c2', name: 'p', args: { id: '2' } }]),
@@ -637,6 +663,28 @@ describe('tool-call scheduler: abort handling', () => {
 })
 
 describe('tool-call scheduler: failure quiescence', () => {
+  it('fulfills executeToolCalls with the first drained scheduler failure', async () => {
+    const ctx = await harness(new MockAdapter([]), 1)
+    ctx.tools.register(gatedParallelTool('p').tool)
+    const schedulerError = new Error('scheduler exploded')
+    ctx.tools[TOOL_RUNTIME_SCHEDULER].dispatch = async () => {
+      throw schedulerError
+    }
+    const agent = ctx.agentLoop.create(SessionId('join-failure-return'), { provider: 'mock', model: 'mock' })
+    agent.session.append('turn/start', { turn: 1 })
+    agent.session.append('step/start', { turn: 1, step: 1 })
+    const outcome = await ctx.agents.withInitiator(agent, () => executeToolCalls(
+      ctx,
+      1,
+      1,
+      [{ type: 'tool-call', id: ToolCallId('c1'), name: 'p', arguments: JSON.stringify({ id: '1' }) }],
+      new AbortController().signal,
+      () => {},
+    ))
+    expect(outcome).toEqual({ concluded: false, failure: schedulerError })
+    expect(events(agent).some(event => event.type === 'tool/result')).toBe(false)
+  })
+
   it('stops new dispatches and drains started bodies before surfacing the first failure', async () => {
     const adapter = new MockAdapter([
       multiCall([
@@ -693,6 +741,10 @@ describe('tool-call scheduler: failure quiescence', () => {
     expect(events(agent).findLast(event => event.type === 'turn/end')).toMatchObject({
       data: { reason: { kind: 'error', error: { message: schedulerError.message, code: 'UNKNOWN' } } },
     })
+    const loop = agent as ReactLoopAgent
+    expect(loop.lastNodeCheckpoint?.node).toBe('apply-pre-step')
+    expect(loop.lastNodeCheckpoint?.state.failure).toBeNull()
+    expect(loop.nodeTrace.map(entry => entry.node)).toEqual(['apply-pre-step'])
   })
 })
 

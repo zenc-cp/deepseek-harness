@@ -38,11 +38,22 @@ import { executeToolCalls } from './tool-calls.ts'
 import {
   TURN_STEP_STATE_VERSION,
   applyPreStepDecision,
+  applyRequestError,
+  applyStepOutcome,
+  applyTurnStepFailure,
+  checkpointAfterNode,
   evolveTurnStepState,
   freezeTurnStepState,
   recordNodeVisit,
-  routePreStep,
+  resumeTurnStep,
+  routeClaimed,
+  routeFailure,
+  routeRequestError,
+  traceAfterNode,
+  validateTurnStepGraph,
+  type TurnStepCheckpoint,
   type TurnStepState,
+  type TurnStepTraceEntry,
 } from './turn-step-state.ts'
 
 type Phase =
@@ -93,6 +104,10 @@ export class ReactLoopAgent implements Agent {
   /** Surface generation of the preceding built request. */
   private requestSurfaceGeneration: number | undefined
   private readonly runtimeContext: RuntimeContextProjection
+  /** In-memory last-good graph checkpoint. Not session-checkpoint-policy. */
+  private heldNodeCheckpoint: TurnStepCheckpoint | null = null
+  /** In-memory completed declared-node path for this kick. */
+  private heldNodeTrace: TurnStepTraceEntry[] = []
 
   constructor(
     private loopCtx: Context,
@@ -116,6 +131,23 @@ export class ReactLoopAgent implements Agent {
 
   get status(): AgentStatus {
     return this.phase.kind === 'idle' || this.phase.kind === 'maintenance' ? 'idle' : 'running'
+  }
+
+  /** Last-good node checkpoint for this driver, or null before the first node. */
+  get lastNodeCheckpoint(): TurnStepCheckpoint | null {
+    return this.heldNodeCheckpoint
+  }
+
+  /** Frozen completed declared-node path for the current kick. */
+  get nodeTrace(): readonly TurnStepTraceEntry[] {
+    return Object.freeze([...this.heldNodeTrace])
+  }
+
+  /** Publish last-good checkpoint and its matching path entry together. */
+  private publishNode(checkpoint: TurnStepCheckpoint, startedAt: number, finishedAt: number): void {
+    const entry = traceAfterNode(checkpoint, startedAt, finishedAt)
+    this.heldNodeCheckpoint = checkpoint
+    this.heldNodeTrace.push(entry)
   }
 
   /** Commit a phase and publish its externally visible status transition. */
@@ -227,6 +259,9 @@ export class ReactLoopAgent implements Agent {
 
   private async kick(): Promise<void> {
     try {
+      validateTurnStepGraph()
+      this.heldNodeCheckpoint = null
+      this.heldNodeTrace = []
       while (await this.turn()) {}
     } catch (_error) {
       // Reported failures and cancellation are contained at the driver boundary.
@@ -294,7 +329,7 @@ export class ReactLoopAgent implements Agent {
       surfaceGeneration: this.requestSurfaceGeneration ?? null,
       requestHeaderLogged: this.requestHeaderLogged,
       failure: null,
-      visits: { 'apply-pre-step': 0 },
+      visits: { 'apply-pre-step': 0, 'apply-step-outcome': 0 },
     })
   }
 
@@ -315,20 +350,26 @@ export class ReactLoopAgent implements Agent {
     phase.turn = turn
     let turnEnds: TurnEndReason | null = null
     let target: InboxTarget = 'next-turn'
-    let priorVisits: TurnStepState['visits'] = { 'apply-pre-step': 0 }
+    let priorVisits: TurnStepState['visits'] = { 'apply-pre-step': 0, 'apply-step-outcome': 0 }
     try {
-      while (true) {
+      stepLoop: while (true) {
         signal.throwIfAborted()
         const step = phase.step + 1
         const decision = await this.preStep(target, { turn, step })
+        const startedAt = Date.now()
         const counted = recordNodeVisit(
-          evolveTurnStepState(this.captureTurnStepState(turn, step, target), { visits: priorVisits }),
+          evolveTurnStepState(this.captureTurnStepState(turn, step, target), {
+            visits: priorVisits,
+            turnEnd: turnEnds,
+          }),
           'apply-pre-step',
         )
         const state = applyPreStepDecision(counted, decision)
+        const checkpoint = checkpointAfterNode(state, 'apply-pre-step')
+        this.publishNode(checkpoint, startedAt, Date.now())
         priorVisits = state.visits
-        const route = routePreStep(state)
-        switch (route) {
+        const resumed = resumeTurnStep(checkpoint)
+        switch (resumed.route) {
           case 'block-turn':
             turnEnds = { kind: 'blocked' }
             return false
@@ -336,40 +377,64 @@ export class ReactLoopAgent implements Agent {
             break
           /* v8 ignore next -- closed-union exhaustiveness guard */
           default:
-            assertNever(route, 'pre-step router')
+            assertNever(resumed.route, 'pre-step router')
         }
         /* v8 ignore next -- applyPreStepDecision copies decision.kind onto preStep */
         if (decision.kind === 'reject') this.throwError(new Error(`agent "${this.id}": pre-step State diverged from decision`))
-        if (turnEnds && state.claimed.length === 0) break
-        // A removed waking message or an enter decision rewritten to empty
-        // still owns the initial turn boundary, but it spends no model call.
-        if (phase.step === 0 && state.claimed.length === 0) {
-          turnEnds = { kind: 'completed' }
-          return false
+        switch (routeClaimed(state)) {
+          case 'enter-step':
+            break
+          case 'complete-turn':
+            turnEnds = { kind: 'completed' }
+            return false
+          case 'preserve-turn-end':
+            break stepLoop
         }
         signal.throwIfAborted()
         this.session.append('step/start', { turn, step })
         phase.step = step
+        let stepEnd: StepEndReason | null
         try {
           for (const message of state.claimed) {
             this.session.append('user/message', message, { surfaceOp: 'append' })
           }
-          // max-tokens is sticky: once any step hits the ceiling, later steps
-          // that complete normally must not downgrade the turn outcome.
-          const stepEnd = await this.step(decision.assembly, state.startsRequestSeries)
-          // max-tokens stays sticky: a later completed step must not
-          // downgrade the turn outcome.
-          if (turnEnds === null || turnEnds.kind !== 'max-tokens') turnEnds = stepEnd
+          stepEnd = await this.step(decision.assembly, state.startsRequestSeries)
         } finally {
           this.session.append('step/end', { turn, step })
         }
         signal.throwIfAborted()
-        if (turnEnds && this.inbox.nextStep.length === 0) {
+        const snapshotInbox = (): TurnStepState['inbox'] => ({
+          nextTurn: [...this.inbox.nextTurn],
+          nextStep: [...this.inbox.nextStep],
+        })
+        let inbox = snapshotInbox()
+        if (applyStepOutcome(state, stepEnd, inbox).turnEnd && inbox.nextStep.length === 0) {
           await this.dispatch.serial('agent/turn-stopping', { turn, signal })
           signal.throwIfAborted()
+          inbox = snapshotInbox()
         }
-        if (turnEnds && this.inbox.nextStep.length === 0) break
-        target = 'next-step'
+        const outcomeStartedAt = Date.now()
+        const projected = applyStepOutcome(state, stepEnd, inbox)
+        const outcomeState = recordNodeVisit(
+          evolveTurnStepState(projected, { visits: priorVisits }),
+          'apply-step-outcome',
+        )
+        const outcomeCheckpoint = checkpointAfterNode(outcomeState, 'apply-step-outcome')
+        this.publishNode(outcomeCheckpoint, outcomeStartedAt, Date.now())
+        priorVisits = outcomeState.visits
+        const outcomeResume = resumeTurnStep(outcomeCheckpoint)
+        switch (outcomeResume.route) {
+          case 'finish-turn':
+            turnEnds = outcomeState.turnEnd
+            break stepLoop
+          case 'next-pre-step':
+            turnEnds = outcomeState.turnEnd
+            target = 'next-step'
+            break
+          /* v8 ignore next -- checkpoint node selects the step-outcome router */
+          default:
+            assertNever(outcomeResume.route, 'step-outcome router')
+        }
       }
     } catch (error: unknown) {
       if (signal.aborted) {
@@ -378,11 +443,22 @@ export class ReactLoopAgent implements Agent {
       }
       // Every failure is structured: an `LlmError` keeps its facts, anything
       // else flattens to `errorChain` text under the `UNKNOWN` code.
-      turnEnds = {
-        kind: 'error',
-        error: error instanceof LlmError
-          ? error.failure
-          : { message: errorChain(error), code: 'UNKNOWN' },
+      const structured = error instanceof LlmError
+        ? error.failure
+        : { message: errorChain(error), code: 'UNKNOWN' }
+      turnEnds = { kind: 'error', error: structured }
+      if (this.heldNodeCheckpoint) {
+        const failed = applyTurnStepFailure(this.heldNodeCheckpoint.state, {
+          message: structured.message,
+          code: structured.code,
+        })
+        switch (routeFailure(failed)) {
+          case 'stop-turn':
+            this.throwError(error)
+          case 'continue':
+            /* v8 ignore next -- catch writes non-null failure */
+            this.throwError(new Error(`agent "${this.id}": failure router continued after a catch`))
+        }
       }
       this.throwError(error)
     } finally {
@@ -464,10 +540,22 @@ export class ReactLoopAgent implements Agent {
           () => Promise.resolve<RequestErrorAction>(undefined),
         )
         signal.throwIfAborted()
+        const kind = action?.kind === 'retry' ? 'retry' : 'throw'
+        if (this.heldNodeCheckpoint) {
+          const recovered = applyRequestError(this.heldNodeCheckpoint.state, kind)
+          switch (routeRequestError(recovered)) {
+            case 'retry':
+              continue
+            case 'throw':
+              throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
+          }
+        }
+        /* v8 ignore start -- enter-step always checkpoints before step() */
         if (action?.kind !== 'retry') {
           throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
         }
         continue
+        /* v8 ignore stop */
       }
 
       const message = createAssistantMessage({
@@ -492,10 +580,30 @@ export class ReactLoopAgent implements Agent {
 
       const toolCalls = message.content.filter(block => block.type === 'tool-call')
       if (toolCalls.length === 0) return { kind: 'completed' }
-      const { concluded } = await executeToolCalls(
+      const { concluded, failure } = await executeToolCalls(
         this.loopCtx, turn, step, toolCalls, signal,
         context => this.inbox.splice('next-step', this.inbox.nextStep.length, 0, [context]),
       )
+      if (failure != null) {
+        const structured = failure instanceof LlmError
+          ? failure.failure
+          : { message: errorChain(failure), code: 'UNKNOWN' }
+        if (this.heldNodeCheckpoint) {
+          const failed = applyTurnStepFailure(this.heldNodeCheckpoint.state, {
+            message: structured.message,
+            code: structured.code,
+          })
+          switch (routeFailure(failed)) {
+            case 'stop-turn':
+              throw failure
+            case 'continue':
+              /* v8 ignore next -- scheduler failure writes non-null facts */
+              this.throwError(new Error(`agent "${this.id}": failure router continued after a scheduler failure`))
+          }
+        }
+        /* v8 ignore next -- enter-step always checkpoints before step() */
+        throw failure
+      }
       return concluded ? { kind: 'completed' } : null
     }
   }

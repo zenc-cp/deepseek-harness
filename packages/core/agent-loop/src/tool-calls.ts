@@ -7,7 +7,7 @@
  *
  * Abort records synthetic error results for skipped calls so replay stays
  * valid. A terminal scheduler failure preserves already-recorded `tool/call`
- * events without fabricating results.
+ * events without fabricating results, then returns the first failure.
  * @module dsh-agent-loop/tool-calls
  */
 
@@ -15,7 +15,25 @@ import type { Context } from '@deepseek-ai/cordis'
 import { createToolResultMessage, type ToolCallBlock } from '@deepseek-ai/dsh-llm'
 import type { Session, UserMessage } from '@deepseek-ai/dsh-session'
 import { TOOL_ABORTED_BEFORE_DISPATCH, TOOL_RUNTIME_SCHEDULER, type ToolExecutionInput, type ToolExecutionMode, type ToolExecutionResult, type ToolRunContext } from '@deepseek-ai/dsh-tools'
-import { assertNever } from '@deepseek-ai/dsh-util-values'
+import { assertNever, deepFreeze } from '@deepseek-ai/dsh-util-values'
+
+/** Static join contract for one assistant message's tool-call fan-out. */
+export const TOOL_CALL_JOIN_POLICY = deepFreeze({
+  kind: 'all',
+  commitOrder: 'model-order',
+  conclusion: 'any-concludes-turn',
+  abort: 'drain-started-synthesize-unstarted',
+  schedulerFailure: 'drain-started-failure-first',
+} as const)
+
+/** The only tool-call join policy implemented by this scheduler. */
+export type ToolCallJoinPolicy = typeof TOOL_CALL_JOIN_POLICY
+
+/** Fulfilled join result. Scheduler failure is data, not a rejected promise. */
+export interface ToolCallJoinOutcome {
+  readonly concluded: boolean
+  readonly failure: unknown | null
+}
 
 /** One tool call after argument parsing, ready to schedule. */
 interface PlannedCall {
@@ -30,12 +48,13 @@ interface Slot {
   needsPost: boolean
 }
 
-/** One scheduler group outcome, including a drained cancellation. */
+/** One scheduler group outcome, including a drained cancellation or failure. */
 interface GroupOutcome {
   consumed: number
   aborted: boolean
   /** Whether any committed result carried {@link ToolExecutionResult.concludesTurn}. */
   concluded: boolean
+  failure: unknown | null
 }
 
 /**
@@ -45,7 +64,7 @@ interface GroupOutcome {
  * the signal still aborted after accepting started-call context through the
  * caller-supplied acceptor (the machine stages it in its next-step inbox for the
  * step boundary). An internal scheduler failure stops new dispatches, drains
- * already-started dispatches, and rejects with the first failure without
+ * already-started dispatches, and returns the first failure without
  * fabricating tool results.
  * The committed step's AgentLoop driver boundary supplies the initiating Agent
  * that becomes each explicit {@link ToolExecutionInput.agent}.
@@ -64,7 +83,7 @@ export async function executeToolCalls(
   toolCalls: ToolCallBlock[],
   signal: AbortSignal,
   acceptContext: (context: UserMessage) => void,
-): Promise<{ concluded: boolean }> {
+): Promise<ToolCallJoinOutcome> {
   const agent = ctx.agents.requireInitiator()
   const { session } = agent
 
@@ -93,12 +112,13 @@ export async function executeToolCalls(
     )
     next += outcome.consumed
     concluded ||= outcome.concluded
+    if (outcome.failure != null) return { concluded, failure: outcome.failure }
     if (outcome.aborted) {
       for (const call of planned.slice(next)) appendSkippedToolCall(session, turn, step, call.block)
-      return { concluded }
+      return { concluded, failure: null }
     }
   }
-  return { concluded }
+  return { concluded, failure: null }
 }
 
 /** Parse model arguments, preserving invalid JSON as text and mapping empty input to `{}`. */
@@ -117,7 +137,7 @@ function parseArguments(raw: string): unknown {
  * in model order. Abort stops starts, drains and commits started calls, accepts
  * their contexts into the owning batch, records results for skipped calls, and
  * returns an aborted outcome. Scheduler failure drains dispatches without
- * committing synthetic recovery results.
+ * committing synthetic recovery results, then returns the first failure.
  */
 async function runGroup(
   ctx: Context,
@@ -232,18 +252,18 @@ async function runGroup(
   } catch (error: unknown) {
     schedulerFailure ??= { error }
     await Promise.allSettled(inFlight.values())
-    throw schedulerFailure.error
+    return { consumed: started, aborted: false, concluded, failure: schedulerFailure.error }
   }
 
   if (aborted) {
     // Started calls and accepted context settle first; every remaining model
     // call then receives an ordered synthetic result before the turn aborts.
     for (const call of group.slice(started)) appendSkippedToolCall(session, turn, step, call.block)
-    return { consumed: group.length, aborted: true, concluded }
+    return { consumed: group.length, aborted: true, concluded, failure: null }
   }
   /* v8 ignore next -- unreachable: a non-aborted group commits every started call */
   if (committed !== started) throw new Error('tool-call scheduler: uncommitted settled calls')
-  return { consumed: started, aborted: false, concluded }
+  return { consumed: started, aborted: false, concluded, failure: null }
 }
 
 /** Append the durable call/result pair for a model call skipped after cancellation. */

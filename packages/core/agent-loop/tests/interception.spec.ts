@@ -17,6 +17,7 @@ import AgentRegistry, {
 
 import AgentLoop from '@deepseek-ai/dsh-agent-loop'
 import SessionProjectionRegistry from '@deepseek-ai/dsh-session-projection'
+import { ReactLoopAgent } from '../src/agent.ts'
 import { MockAdapter, textResponse, toolCallResponse } from './mock-adapter.ts'
 
 /**
@@ -78,6 +79,122 @@ describe('agent/pre-step', () => {
     expect(seen).toEqual(['hello'])
     const userMsg = events(agent).find(e => e.type === 'user/message')
     expect(userMsg?.type === 'user/message' && userMsg.data.content).toEqual([{ type: 'text', text: 'hello' }])
+  })
+
+  it('holds the last pure-node checkpoint and clears it at the next kick', async () => {
+    const adapter = new MockAdapter([textResponse('ok'), textResponse('ok2')])
+    const ctx = await harness(adapter)
+    const agent = ctx.agentLoop.create(SessionId('node-checkpoint'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    expect(agent).toBeInstanceOf(ReactLoopAgent)
+    const loop = agent as ReactLoopAgent
+    expect(loop.lastNodeCheckpoint).toBeNull()
+
+    const seen: Array<ReactLoopAgent['lastNodeCheckpoint']> = []
+    ctx.on('agent/pre-step', async (_payload, next) => {
+      seen.push(loop.lastNodeCheckpoint)
+      return next()
+    })
+
+    send(agent, 'hello')
+    await waitForIdle(ctx, agent)
+    const first = loop.lastNodeCheckpoint
+    expect(first?.node).toBe('apply-step-outcome')
+    expect(first?.state.preStep).toBe('enter')
+    expect(first?.state.visits['apply-step-outcome']).toBe(1)
+    expect(first?.state.turn).toBe(1)
+    expect(Object.isFrozen(first)).toBe(true)
+    expect(seen[0]).toBeNull()
+
+    send(agent, 'again')
+    await waitForIdle(ctx, agent)
+    const second = loop.lastNodeCheckpoint
+    expect(second?.state.turn).toBe(2)
+    expect(second).not.toBe(first)
+    expect(seen[1]).toBeNull()
+    expect(loop.nodeTrace.map(entry => entry.node)).toEqual(['apply-pre-step', 'apply-step-outcome'])
+    expect(loop.nodeTrace.at(-1)?.state).toBe(second?.state)
+  })
+
+  it('records an in-memory declared-node path and clears it at the next kick', async () => {
+    const adapter = new MockAdapter([
+      textResponse('ok'),
+      toolCallResponse('c1', 'echo', { text: 'hi' }),
+      textResponse('done'),
+    ])
+    const ctx = await harness(adapter)
+    ctx.tools.register(defineContentToolFixture({
+      name: 'echo',
+      description: 'echo',
+      parameters: { text: { type: 'string', required: true } },
+      execute: async ({ text }) => [{ type: 'text', text }],
+    }))
+    const agent = ctx.agentLoop.create(SessionId('node-trace'), {
+      provider: 'mock',
+      model: 'mock',
+    })
+    const loop = agent as ReactLoopAgent
+    expect(loop.nodeTrace).toEqual([])
+
+    const seen: string[][] = []
+    ctx.on('agent/pre-step', async (_payload, next) => {
+      seen.push(loop.nodeTrace.map(entry => entry.node))
+      return next()
+    })
+
+    send(agent, 'hello')
+    await waitForIdle(ctx, agent)
+    expect(loop.nodeTrace.map(entry => ({ node: entry.node, turn: entry.turn, step: entry.step })))
+      .toEqual([
+        { node: 'apply-pre-step', turn: 1, step: 1 },
+        { node: 'apply-step-outcome', turn: 1, step: 1 },
+      ])
+    expect(loop.nodeTrace.every(entry => Number.isSafeInteger(entry.startedAt) && entry.startedAt >= 0)).toBe(true)
+    expect(loop.nodeTrace.every(entry => Number.isSafeInteger(entry.durationMs) && entry.durationMs >= 0)).toBe(true)
+    expect(loop.nodeTrace.at(-1)?.state).toBe(loop.lastNodeCheckpoint?.state)
+    expect(Object.isFrozen(loop.nodeTrace)).toBe(true)
+    expect(seen[0]).toEqual([])
+
+    send(agent, 'continue with tools')
+    await waitForIdle(ctx, agent)
+    expect(seen[1]).toEqual([])
+    expect(loop.nodeTrace.map(entry => entry.node)).toEqual([
+      'apply-pre-step',
+      'apply-step-outcome',
+      'apply-pre-step',
+      'apply-step-outcome',
+    ])
+  })
+
+  it('traces only apply-pre-step for empty-enter and reject turns', async () => {
+    const adapter = new MockAdapter([textResponse('must not run'), textResponse('must not run')])
+    const ctx = await harness(adapter)
+    const emptyAgent = ctx.agentLoop.create(SessionId('node-trace-empty'), {
+      provider: 'mock',
+      model: 'mock',
+    }) as ReactLoopAgent
+    ctx.on('agent/pre-step', ({ agent: subject }, next) => {
+      if (subject !== emptyAgent) return next()
+      return Promise.resolve({ kind: 'enter', messages: [] })
+    })
+    send(emptyAgent, 'go')
+    await waitForIdle(ctx, emptyAgent)
+    expect(emptyAgent.nodeTrace.map(entry => entry.node)).toEqual(['apply-pre-step'])
+    expect(emptyAgent.lastNodeCheckpoint?.node).toBe('apply-pre-step')
+
+    const rejectAgent = ctx.agentLoop.create(SessionId('node-trace-reject'), {
+      provider: 'mock',
+      model: 'mock',
+    }) as ReactLoopAgent
+    ctx.on('agent/pre-step', async ({ agent: subject }): Promise<PreStepDecision> => (
+      subject === rejectAgent ? { kind: 'reject' } : { kind: 'enter', messages: [] }
+    ))
+    send(rejectAgent, 'blocked')
+    await waitForIdle(ctx, rejectAgent)
+    expect(rejectAgent.nodeTrace.map(entry => entry.node)).toEqual(['apply-pre-step'])
+    expect(rejectAgent.lastNodeCheckpoint?.state.preStep).toBe('reject')
   })
 
   it('reports the request coordinates for initial and tool-continuation prompts', async () => {
