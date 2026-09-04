@@ -22,11 +22,16 @@
       "types": "./lib/types/invariant.d.ts",
       "default": "./lib/invariant.js"
     },
+    "./state": {
+      "types": "./lib/types/state.d.ts",
+      "default": "./lib/state.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
     "lib/index.js",
     "lib/invariant.js",
+    "lib/state.js",
     "lib/types/**/*.d.ts"
   ],
   "license": "MIT",

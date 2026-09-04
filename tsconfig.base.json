@@ -122,6 +122,7 @@
       "@deepseek-ai/dsh-agent/invariant": ["./packages/core/agent/src/invariant.ts"],
       "@deepseek-ai/dsh-scope/invariant": ["./packages/core/scope/src/invariant.ts"],
       "@deepseek-ai/dsh-agent-loop/invariant": ["./packages/core/agent-loop/src/invariant.ts"],
+      "@deepseek-ai/dsh-agent-loop/state": ["./packages/core/agent-loop/src/state.ts"],
       "@deepseek-ai/dsh-experimental-agent-team/invariant": ["./packages/experimental/agent-team/src/invariant.ts"],
       "@deepseek-ai/dsh-experimental-tool-agent-team/invariant": ["./packages/experimental/tool-agent-team/src/invariant.ts"],
       "@deepseek-ai/dsh-experimental-webworker-runtime/invariant": ["./packages/experimental/webworker-runtime/src/invariant.ts"],
