@@ -70,7 +70,11 @@ For interactive programs, `spawnTerminal` allocates a real PTY: write text, read
 
 ### Environment every child starts from
 
-Children never inherit the harness's ambient secrets: credential-shaped names and ambient `DSH_*` facts are scrubbed, and the caller's explicit `env` merges after that scrub. A deliberately forwarded credential or a current `DSH_*` deployment fact still reaches the child; an explicit `undefined` tombstone removes an ordinary ambient entry.
+Credential-shaped environment names and ambient `DSH_*` facts are scrubbed, and the caller's explicit `env` merges after that scrub. A deliberately forwarded credential or a current `DSH_*` deployment fact still reaches the child; an explicit `undefined` tombstone removes an ordinary ambient entry.
+
+Inherited Git count/key/value entries are validated and preserved as one complete group, without dropping or reordering settings. `safe.directory` and `core.hooksPath` retain their supplied values. `safe.bareRepository` accepts only `explicit`, and `credential.interactive` accepts only `never`. The launcher identity aliases for `blame`, `branch`, `config`, `describe`, `log`, `reflog`, `remote`, `rev-parse`, `shortlog`, `stash`, `submodule`, `tag`, and `worktree` accept only the exact corresponding command name as their value. Shell aliases, arguments, other alias names, and changed targets are not forwarded.
+
+Unknown settings, unapproved values, incomplete or malformed groups, and `GIT_CONFIG_PARAMETERS` reject environment construction without including values in the error. Configuration names are matched case-insensitively, while accepted values are copied unchanged. This name-based filter does not identify secrets stored under arbitrary ordinary names. Explicit overrides cannot repair invalid inherited Git entries because validation runs first.
 
 ### What can go wrong
 
