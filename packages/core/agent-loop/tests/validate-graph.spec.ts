@@ -30,7 +30,7 @@ describe('graph validation', () => {
     const errors = validateGraph(bad)
     expect(errors.length).toBeGreaterThan(0)
     expect(errors[0]).toBeInstanceOf(GraphValidationError)
-    expect(errors[0].message).toMatch(/ghostNode/)
+    expect(errors[0]?.message).toMatch(/ghostNode/)
   })
 
   it('requires visit caps on nodes that participate in cycles', () => {

@@ -14,7 +14,7 @@ export type GraphStateErrorCode = 'VERSION_MISMATCH' | 'INVALID'
 /** Loud failure for unknown or other-version snapshots. */
 export class GraphStateError extends Error {
   readonly code: GraphStateErrorCode
-  readonly found?: number
+  readonly found: number | undefined
   readonly expected: number
 
   constructor(code: GraphStateErrorCode, message: string, found?: number) {
