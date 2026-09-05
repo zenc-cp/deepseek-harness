@@ -63,12 +63,13 @@ function sampleState(overrides: Record<string, unknown> = {}): TurnStepState {
     startsRequestSeries: false,
     requestError: 'none',
     stepEnd: null,
+    stepOutcome: null,
     turnEnd: null,
     route: { provider: 'mock', model: 'm' },
     surfaceGeneration: 0,
     requestHeaderLogged: true,
     failure: null,
-    visits: { 'apply-pre-step': 0, 'apply-step-outcome': 0 },
+    visits: { 'apply-pre-step': 0, step: 0, 'apply-step-outcome': 0 },
     ...overrides,
   } as TurnStepState
 }
@@ -111,6 +112,7 @@ describe('turn/step State schema', () => {
     const frozen = freezeTurnStepState(sampleState({
       abortCause: { kind: 'hook', reason: 'stop' },
       stepEnd: { kind: 'max-tokens' },
+      stepOutcome: null,
       turnEnd: { kind: 'error', error: { message: 'boom', code: 'UNKNOWN' } },
       failure: { message: 'boom', code: 'UNKNOWN' },
       surfaceGeneration: null,
@@ -223,6 +225,7 @@ describe('turn/step State schema', () => {
       preStep: 'reject',
       requestError: 'retry',
       stepEnd: { kind: 'completed' },
+      stepOutcome: null,
       abortCause: { kind: 'user' },
     }))
     expect(frozen.phaseKind).toBe('idle')
@@ -317,7 +320,7 @@ describe('turn/step State schema', () => {
     expect(TURN_STEP_VISIT_CAPS).toEqual({ 'apply-pre-step': 256, 'apply-step-outcome': 256 })
 
     const zero = freezeTurnStepState(sampleState({
-      visits: { 'apply-pre-step': 0, 'apply-step-outcome': 0 },
+      visits: { 'apply-pre-step': 0, step: 0, 'apply-step-outcome': 0 },
     }))
     const one = recordNodeVisit(zero, 'apply-pre-step')
     expect(one.visits['apply-pre-step']).toBe(1)
@@ -328,7 +331,7 @@ describe('turn/step State schema', () => {
     expect(two.visits['apply-pre-step']).toBe(2)
 
     const fresh = freezeTurnStepState(sampleState({
-      visits: { 'apply-pre-step': 0, 'apply-step-outcome': 0 },
+      visits: { 'apply-pre-step': 0, step: 0, 'apply-step-outcome': 0 },
       step: 2,
     }))
     const carried = recordNodeVisit(
@@ -340,7 +343,7 @@ describe('turn/step State schema', () => {
     expect(fresh.visits['apply-pre-step']).toBe(0)
 
     const atCap = freezeTurnStepState(sampleState({
-      visits: { 'apply-pre-step': 256, 'apply-step-outcome': 0 },
+      visits: { 'apply-pre-step': 256, step: 0, 'apply-step-outcome': 0 },
     }))
     const overflow = (() => {
       try {
@@ -372,7 +375,7 @@ describe('turn/step State schema', () => {
     expect(() => validateTurnStepGraph()).not.toThrow()
     expect(TURN_STEP_GRAPH.joins).toEqual({
       'tool-calls': {
-        onEdge: { from: 'route-claimed', on: 'enter-step', to: 'apply-step-outcome' },
+        onEdge: { from: 'route-claimed', on: 'enter-step', to: 'step' },
         policy: TOOL_CALL_JOIN_POLICY,
       },
     })
@@ -595,7 +598,7 @@ describe('turn/step State schema', () => {
   it('checkpointAfterNode freezes last-good State and roundtrips as JSON', () => {
     const state = freezeTurnStepState(sampleState({
       preStep: 'enter',
-      visits: { 'apply-pre-step': 1, 'apply-step-outcome': 0 },
+      visits: { 'apply-pre-step': 1, step: 0, 'apply-step-outcome': 0 },
     }))
     const before = JSON.stringify(state)
     const checkpoint = checkpointAfterNode(state, 'apply-pre-step')
@@ -743,9 +746,10 @@ describe('turn/step State schema', () => {
 
   it('applyStepOutcome is a pure v2 node with sticky outcome and declared routing', () => {
     expect(TURN_STEP_STATE_VERSION).toBe(2)
-    expect(TURN_STEP_NODES).toEqual(['apply-pre-step', 'apply-step-outcome'])
+    expect(TURN_STEP_NODES).toEqual(['apply-pre-step', 'step', 'apply-step-outcome'])
     expect(TURN_STEP_VISIT_CAPS).toEqual({
       'apply-pre-step': 256,
+      step: 256,
       'apply-step-outcome': 256,
     })
     expect(STEP_OUTCOME_ROUTER_TARGETS).toEqual(['finish-turn', 'next-pre-step'])
@@ -755,7 +759,7 @@ describe('turn/step State schema', () => {
       stepEnd: null,
       turnEnd: null,
       inbox: { nextTurn: [], nextStep: [] },
-      visits: { 'apply-pre-step': 1, 'apply-step-outcome': 0 },
+      visits: { 'apply-pre-step': 1, step: 0, 'apply-step-outcome': 0 },
     }))
     const before = JSON.stringify(base)
     const completed = applyStepOutcome(base, { kind: 'completed' }, base.inbox)
@@ -797,7 +801,7 @@ describe('turn/step State schema', () => {
     const state = freezeTurnStepState(sampleState({
       turn: 3,
       step: 2,
-      visits: { 'apply-pre-step': 2, 'apply-step-outcome': 1 },
+      visits: { 'apply-pre-step': 2, step: 0, 'apply-step-outcome': 1 },
     }))
     const checkpoint = checkpointAfterNode(state, 'apply-step-outcome')
     const before = JSON.stringify(checkpoint)

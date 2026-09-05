@@ -39,6 +39,7 @@ import {
   TURN_STEP_STATE_VERSION,
   applyPreStepDecision,
   applyRequestError,
+  applyStepNode,
   applyStepOutcome,
   applyTurnStepFailure,
   checkpointAfterNode,
@@ -54,6 +55,7 @@ import {
   type TurnStepCheckpoint,
   type TurnStepState,
   type TurnStepTraceEntry,
+  type StepOutcomeRouterTarget,
 } from './turn-step-state.ts'
 
 type Phase =
@@ -106,6 +108,8 @@ export class ReactLoopAgent implements Agent {
   private readonly runtimeContext: RuntimeContextProjection
   /** In-memory last-good graph checkpoint. Not session-checkpoint-policy. */
   private heldNodeCheckpoint: TurnStepCheckpoint | null = null
+  /** True until the first kick consumes a remount seed without wiping it. */
+  private restoredSeedPending = false
   /** In-memory completed declared-node path for this kick. */
   private heldNodeTrace: TurnStepTraceEntry[] = []
 
@@ -114,6 +118,7 @@ export class ReactLoopAgent implements Agent {
     public readonly id: SessionId,
     public readonly options: AgentOptions,
     public readonly session: Session,
+    restoredNodeCheckpoint?: TurnStepCheckpoint,
   ) {
     this.dispatch = agentEvents(loopCtx, this)
     this.inbox = new Inbox(session, {
@@ -127,6 +132,10 @@ export class ReactLoopAgent implements Agent {
     this.scope = createScope(loopCtx, this)
     this.ctx = this.scope.ctx.extend({ agent: this })
     this.runtimeContext = new RuntimeContextProjection(this.ctx, session)
+    if (restoredNodeCheckpoint !== undefined) {
+      this.heldNodeCheckpoint = restoredNodeCheckpoint
+      this.restoredSeedPending = true
+    }
   }
 
   get status(): AgentStatus {
@@ -148,6 +157,14 @@ export class ReactLoopAgent implements Agent {
     const entry = traceAfterNode(checkpoint, startedAt, finishedAt)
     this.heldNodeCheckpoint = checkpoint
     this.heldNodeTrace.push(entry)
+    this.session.append(
+      'session/checkpoint-node' as Parameters<Session['append']>[0],
+      JSON.parse(JSON.stringify(checkpoint)) as Parameters<Session['append']>[1],
+    )
+    this.session.append(
+      'session/trace-node' as Parameters<Session['append']>[0],
+      JSON.parse(JSON.stringify(entry)) as Parameters<Session['append']>[1],
+    )
   }
 
   /** Commit a phase and publish its externally visible status transition. */
@@ -260,8 +277,12 @@ export class ReactLoopAgent implements Agent {
   private async kick(): Promise<void> {
     try {
       validateTurnStepGraph()
-      this.heldNodeCheckpoint = null
       this.heldNodeTrace = []
+      if (this.restoredSeedPending) {
+        this.restoredSeedPending = false
+      } else {
+        this.heldNodeCheckpoint = null
+      }
       while (await this.turn()) {}
     } catch (_error) {
       // Reported failures and cancellation are contained at the driver boundary.
@@ -321,6 +342,7 @@ export class ReactLoopAgent implements Agent {
       startsRequestSeries: false,
       requestError: 'none',
       stepEnd: null,
+      stepOutcome: null,
       turnEnd: null,
       route: {
         provider: this.options.provider ?? '',
@@ -329,7 +351,7 @@ export class ReactLoopAgent implements Agent {
       surfaceGeneration: this.requestSurfaceGeneration ?? null,
       requestHeaderLogged: this.requestHeaderLogged,
       failure: null,
-      visits: { 'apply-pre-step': 0, 'apply-step-outcome': 0 },
+      visits: { 'apply-pre-step': 0, step: 0, 'apply-step-outcome': 0 },
     })
   }
 
@@ -341,6 +363,72 @@ export class ReactLoopAgent implements Agent {
     const phase = this.phase
     const { signal } = phase.abort
     signal.throwIfAborted()
+
+    // In-flight remount skip: when a restored checkpoint matches an in-progress
+    // turn/step, short-circuit to the resumed route instead of running preStep
+    // and step() from scratch.
+    const held = this.heldNodeCheckpoint
+    if (held !== null && held.state.phaseKind === 'running' && held.node === 'apply-pre-step') {
+      const hasRequest = held.state.requestHeaderLogged
+      const preStepEntered = held.state.preStep === 'enter' || held.state.preStep === 'reject'
+      const sameSession = held.state.sessionId === this.session.id
+      if (hasRequest && preStepEntered && sameSession) {
+        const resumedTurn = held.state.turn
+        const resumedStep = held.state.step
+        try {
+          this.session.append('turn/start', { turn: resumedTurn })
+        } catch (error: unknown) {
+          this.throwError(error)
+        }
+        phase.turn = resumedTurn
+        phase.step = resumedStep
+        const resumed = resumeTurnStep(held)
+        let turnEnds: TurnEndReason | null = null
+        // priorVisits captured from held checkpoint for potential future use in step boundary
+        void held.state.visits
+        try {
+          switch (resumed.route) {
+            case 'block-turn':
+              turnEnds = { kind: 'blocked' }
+              break
+            case 'enter-step': {
+              const claimedRoute = routeClaimed(resumed.state)
+              switch (claimedRoute) {
+                case 'enter-step':
+                  break
+                case 'complete-turn':
+                  turnEnds = { kind: 'completed' }
+                  break
+                case 'preserve-turn-end':
+                  turnEnds = resumed.state.turnEnd
+                  break
+                /* v8 ignore next -- closed union */
+                default:
+                  assertNever(claimedRoute, 'claim router after in-flight skip')
+              }
+              break
+            }
+            /* v8 ignore next -- resumeTurnStep returns the pre-step router */
+            default:
+              assertNever(resumed.route as never, 'pre-step router after in-flight resume')
+          }
+        } finally {
+          try {
+            // oxlint-disable-next-line typescript/no-non-null-assertion -- every path assigns turnEnds
+            this.session.append('turn/end', { turn: resumedTurn, reason: turnEnds! })
+          } catch (error: unknown) {
+            this.throwError(error)
+          }
+        }
+        // If the turn was blocked, do not continue to a new turn.
+        if (turnEnds?.kind === 'blocked') return false
+        // The in-flight turn finished without running step(). Do not loop again.
+        // An enter-step with no new claim is complete; preserve-turn-end keeps the
+        // prior end; complete-turn explicitly finishes.
+        return false
+      }
+    }
+
     const turn = phase.turn + 1
     try {
       this.session.append('turn/start', { turn })
@@ -350,7 +438,7 @@ export class ReactLoopAgent implements Agent {
     phase.turn = turn
     let turnEnds: TurnEndReason | null = null
     let target: InboxTarget = 'next-turn'
-    let priorVisits: TurnStepState['visits'] = { 'apply-pre-step': 0, 'apply-step-outcome': 0 }
+    let priorVisits: TurnStepState['visits'] = { 'apply-pre-step': 0, step: 0, 'apply-step-outcome': 0 }
     try {
       stepLoop: while (true) {
         signal.throwIfAborted()
@@ -403,18 +491,35 @@ export class ReactLoopAgent implements Agent {
           this.session.append('step/end', { turn, step })
         }
         signal.throwIfAborted()
+        // Step boundary node: record the routable outcome of the effectful step body.
+        const stepStartedAt = Date.now()
+        const stepApplied = applyStepNode(state, stepEnd)
+        const stepCounted = recordNodeVisit(
+          evolveTurnStepState(stepApplied, { visits: priorVisits }),
+          'step',
+        )
+        const stepCheckpoint = checkpointAfterNode(stepCounted, 'step')
+        this.publishNode(stepCheckpoint, stepStartedAt, Date.now())
+        priorVisits = stepCounted.visits
+        const stepResume = resumeTurnStep(stepCheckpoint)
+        // All step router targets proceed to apply-step-outcome.
+        // The router records which outcome occurred (completed/max-tokens/tool-calls/error).
+        if (stepResume.route === 'step-error') {
+          // Error path: applyStepOutcome will write failure via the existing error handling below.
+          // For now, fall through to apply-step-outcome which will see stepOutcome.kind === 'error'.
+        }
         const snapshotInbox = (): TurnStepState['inbox'] => ({
           nextTurn: [...this.inbox.nextTurn],
           nextStep: [...this.inbox.nextStep],
         })
         let inbox = snapshotInbox()
-        if (applyStepOutcome(state, stepEnd, inbox).turnEnd && inbox.nextStep.length === 0) {
+        if (applyStepOutcome(stepCounted, stepEnd, inbox).turnEnd && inbox.nextStep.length === 0) {
           await this.dispatch.serial('agent/turn-stopping', { turn, signal })
           signal.throwIfAborted()
           inbox = snapshotInbox()
         }
         const outcomeStartedAt = Date.now()
-        const projected = applyStepOutcome(state, stepEnd, inbox)
+        const projected = applyStepOutcome(stepCounted, stepEnd, inbox)
         const outcomeState = recordNodeVisit(
           evolveTurnStepState(projected, { visits: priorVisits }),
           'apply-step-outcome',
@@ -422,7 +527,7 @@ export class ReactLoopAgent implements Agent {
         const outcomeCheckpoint = checkpointAfterNode(outcomeState, 'apply-step-outcome')
         this.publishNode(outcomeCheckpoint, outcomeStartedAt, Date.now())
         priorVisits = outcomeState.visits
-        const outcomeResume = resumeTurnStep(outcomeCheckpoint)
+        const outcomeResume = resumeTurnStep(outcomeCheckpoint) as { readonly state: TurnStepState; readonly node: 'apply-step-outcome'; readonly route: StepOutcomeRouterTarget }
         switch (outcomeResume.route) {
           case 'finish-turn':
             turnEnds = outcomeState.turnEnd

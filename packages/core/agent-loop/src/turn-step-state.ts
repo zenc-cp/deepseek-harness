@@ -112,6 +112,7 @@ const STATE_KEYS = [
   'startsRequestSeries',
   'requestError',
   'stepEnd',
+  'stepOutcome',
   'turnEnd',
   'route',
   'surfaceGeneration',
@@ -125,6 +126,7 @@ const PRE_STEP_KINDS = ['pending', 'enter', 'reject'] as const
 const REQUEST_ERROR_KINDS = ['none', 'retry', 'throw'] as const
 const CLAIM_TARGETS = ['next-turn', 'next-step'] as const
 const STEP_END_KINDS = ['completed', 'max-tokens'] as const
+const STEP_OUTCOME_KINDS = ['completed', 'max-tokens', 'tool-calls', 'error'] as const
 const SIMPLE_TURN_END_KINDS = ['completed', 'blocked', 'max-tokens', 'interrupted'] as const
 const MESSAGE_KEYS = ['id', 'role', 'content', 'source'] as const
 const INBOX_KEYS = ['nextTurn', 'nextStep'] as const
@@ -172,8 +174,14 @@ export const STEP_OUTCOME_ROUTER_TARGETS = ['finish-turn', 'next-pre-step'] as c
 /** One destination from {@link STEP_OUTCOME_ROUTER_TARGETS}. */
 export type StepOutcomeRouterTarget = (typeof STEP_OUTCOME_ROUTER_TARGETS)[number]
 
+/** Explicit destinations after the `step` node (effectful boundary). */
+export const STEP_ROUTER_TARGETS = ['step-completed', 'step-max-tokens', 'step-tool-calls', 'step-error'] as const
+
+/** One destination from {@link STEP_ROUTER_TARGETS}. */
+export type StepRouterTarget = (typeof STEP_ROUTER_TARGETS)[number]
+
 /** Declared graph nodes that may carry a visit cap. */
-export const TURN_STEP_NODES = ['apply-pre-step', 'apply-step-outcome'] as const
+export const TURN_STEP_NODES = ['apply-pre-step', 'step', 'apply-step-outcome'] as const
 
 /** One id from {@link TURN_STEP_NODES}. */
 export type TurnStepNodeId = (typeof TURN_STEP_NODES)[number]
@@ -181,6 +189,7 @@ export type TurnStepNodeId = (typeof TURN_STEP_NODES)[number]
 /** Per-node visit budgets. Graph safety rail, not a product turn budget. */
 export const TURN_STEP_VISIT_CAPS: { readonly [K in TurnStepNodeId]: number } = {
   'apply-pre-step': 256,
+  step: 256,
   'apply-step-outcome': 256,
 }
 
@@ -189,7 +198,7 @@ export type TurnStepVisits = { readonly [K in TurnStepNodeId]: number }
 
 const CHECKPOINT_KEYS = ['schemaVersion', 'node', 'state'] as const
 const GRAPH_KEYS = ['entry', 'nodes', 'routers', 'terminals', 'edges', 'caps', 'joins'] as const
-const ROUTER_IDS = ['route-pre-step', 'route-claimed', 'route-step-outcome'] as const
+const ROUTER_IDS = ['route-pre-step', 'route-claimed', 'route-step', 'route-step-outcome'] as const
 const ROUTER_KEYS = ['after', 'targets'] as const
 const NODE_EDGE_KEYS = ['from', 'to'] as const
 const ROUTER_EDGE_KEYS = ['from', 'on', 'to'] as const
@@ -197,7 +206,7 @@ const JOIN_IDS = ['tool-calls'] as const
 const JOIN_KEYS = ['onEdge', 'policy'] as const
 const JOIN_POLICY_KEYS = ['kind', 'commitOrder', 'conclusion', 'abort', 'schedulerFailure'] as const
 
-/** Static declared pre-step graph. `step()` stays on the enter-step edge, not a node. */
+/** Static declared pre-step graph. `step()` is now a declared boundary node. */
 export interface TurnStepGraph {
   readonly entry: TurnStepNodeId
   readonly nodes: readonly TurnStepNodeId[]
@@ -209,6 +218,10 @@ export interface TurnStepGraph {
     readonly 'route-claimed': {
       readonly after: TurnStepNodeId
       readonly targets: readonly ClaimedRouterTarget[]
+    }
+    readonly 'route-step': {
+      readonly after: TurnStepNodeId
+      readonly targets: readonly StepRouterTarget[]
     }
     readonly 'route-step-outcome': {
       readonly after: TurnStepNodeId
@@ -247,6 +260,10 @@ export const TURN_STEP_GRAPH: TurnStepGraph = deepFreeze({
       after: 'apply-pre-step',
       targets: [...CLAIMED_ROUTER_TARGETS],
     },
+    'route-step': {
+      after: 'step',
+      targets: [...STEP_ROUTER_TARGETS],
+    },
     'route-step-outcome': {
       after: 'apply-step-outcome',
       targets: [...STEP_OUTCOME_ROUTER_TARGETS],
@@ -259,7 +276,12 @@ export const TURN_STEP_GRAPH: TurnStepGraph = deepFreeze({
     { from: 'route-pre-step', on: 'enter-step', to: 'route-claimed' },
     { from: 'route-claimed', on: 'complete-turn', to: 'terminal' },
     { from: 'route-claimed', on: 'preserve-turn-end', to: 'terminal' },
-    { from: 'route-claimed', on: 'enter-step', to: 'apply-step-outcome' },
+    { from: 'route-claimed', on: 'enter-step', to: 'step' },
+    { from: 'step', to: 'route-step' },
+    { from: 'route-step', on: 'step-completed', to: 'apply-step-outcome' },
+    { from: 'route-step', on: 'step-max-tokens', to: 'apply-step-outcome' },
+    { from: 'route-step', on: 'step-tool-calls', to: 'apply-step-outcome' },
+    { from: 'route-step', on: 'step-error', to: 'apply-step-outcome' },
     { from: 'apply-step-outcome', to: 'route-step-outcome' },
     { from: 'route-step-outcome', on: 'finish-turn', to: 'terminal' },
     { from: 'route-step-outcome', on: 'next-pre-step', to: 'apply-pre-step' },
@@ -267,7 +289,7 @@ export const TURN_STEP_GRAPH: TurnStepGraph = deepFreeze({
   caps: { ...TURN_STEP_VISIT_CAPS },
   joins: {
     'tool-calls': {
-      onEdge: { from: 'route-claimed', on: 'enter-step', to: 'apply-step-outcome' },
+      onEdge: { from: 'route-claimed', on: 'enter-step', to: 'step' },
       policy: TOOL_CALL_JOIN_POLICY,
     },
   },
@@ -278,6 +300,13 @@ export type TurnStepRequestErrorKind = (typeof REQUEST_ERROR_KINDS)[number]
 
 /** Step outcome the loop currently returns from `step()`. */
 export type TurnStepStepEnd = { readonly kind: 'completed' } | { readonly kind: 'max-tokens' }
+
+/** Routable outcome after the step boundary node. */
+export type TurnStepStepOutcome =
+  | { readonly kind: 'completed' }
+  | { readonly kind: 'max-tokens' }
+  | { readonly kind: 'tool-calls' }
+  | { readonly kind: 'error' }
 
 /** Uniform frozen snapshot every later graph node will take in and return. */
 export interface TurnStepState {
@@ -298,6 +327,7 @@ export interface TurnStepState {
   readonly startsRequestSeries: boolean
   readonly requestError: TurnStepRequestErrorKind
   readonly stepEnd: TurnStepStepEnd | null
+  readonly stepOutcome: TurnStepStepOutcome | null
   readonly turnEnd: TurnEndReason | null
   readonly route: {
     readonly provider: string
@@ -335,6 +365,11 @@ export type TurnStepResume =
     readonly state: TurnStepState
     readonly node: 'apply-pre-step'
     readonly route: PreStepRouterTarget
+  }
+  | {
+    readonly state: TurnStepState
+    readonly node: 'step'
+    readonly route: StepRouterTarget
   }
   | {
     readonly state: TurnStepState
@@ -468,6 +503,39 @@ export function routeStepOutcome(state: TurnStepState): StepOutcomeRouterTarget 
 }
 
 /**
+ * Boundary node after the effectful step body. Records the routable outcome.
+ * The step body (model streaming, tool calls, session writes) stays effectful.
+ * @param state - frozen snapshot before the step outcome is applied.
+ * @param outcome - result from the step body.
+ * @returns a new frozen snapshot with stepOutcome set.
+ */
+export function applyStepNode(state: TurnStepState, outcome: TurnStepStepEnd | null): TurnStepState {
+  if (outcome === null) {
+    // Tool calls were executed but more work remains (concluded=false case)
+    return evolveTurnStepState(state, {
+      stepOutcome: { kind: 'tool-calls' as const },
+    })
+  }
+  if (outcome.kind === 'max-tokens') {
+    return evolveTurnStepState(state, {
+      stepOutcome: { kind: 'max-tokens' as const },
+    })
+  }
+  return evolveTurnStepState(state, {
+    stepOutcome: { kind: 'completed' as const },
+  })
+}
+
+/** Route the step boundary node using its frozen outcome. */
+export function routeStep(state: TurnStepState): StepRouterTarget {
+  if (state.stepOutcome === null) return 'step-error'
+  if (state.stepOutcome.kind === 'error') return 'step-error'
+  if (state.stepOutcome.kind === 'max-tokens') return 'step-max-tokens'
+  if (state.stepOutcome.kind === 'tool-calls') return 'step-tool-calls'
+  return 'step-completed'
+}
+
+/**
  * First pure node: write a pre-step enter/reject decision onto State.
  * Claiming, prompt assembly, and the waterfall stay in the driver.
  * @param state - frozen snapshot from before the decision is applied.
@@ -591,6 +659,9 @@ export function resumeTurnStep(
   checkpoint: TurnStepCheckpoint & { readonly node: 'apply-pre-step' },
 ): Extract<TurnStepResume, { readonly node: 'apply-pre-step' }>
 export function resumeTurnStep(
+  checkpoint: TurnStepCheckpoint & { readonly node: 'step' },
+): Extract<TurnStepResume, { readonly node: 'step' }>
+export function resumeTurnStep(
   checkpoint: TurnStepCheckpoint & { readonly node: 'apply-step-outcome' },
 ): Extract<TurnStepResume, { readonly node: 'apply-step-outcome' }>
 export function resumeTurnStep(checkpoint: unknown): TurnStepResume
@@ -601,6 +672,13 @@ export function resumeTurnStep(checkpoint: unknown): TurnStepResume {
       state: parsed.state,
       node: 'apply-pre-step' as const,
       route: routePreStep(parsed.state),
+    })
+  }
+  if (parsed.node === 'step') {
+    return deepFreeze({
+      state: parsed.state,
+      node: 'step' as const,
+      route: routeStep(parsed.state),
     })
   }
   return deepFreeze({
@@ -670,6 +748,10 @@ export function validateTurnStepGraph(graph: unknown = TURN_STEP_GRAPH): void {
     // oxlint-disable-next-line typescript/no-non-null-assertion -- router ids matched ROUTER_IDS
     if (!sameStringList(routerTargets.get('route-claimed')!, CLAIMED_ROUTER_TARGETS)) {
       invalidGraph('route-claimed.targets drifted from CLAIMED_ROUTER_TARGETS')
+    }
+    // oxlint-disable-next-line typescript/no-non-null-assertion -- router ids matched ROUTER_IDS
+    if (!sameStringList(routerTargets.get('route-step')!, STEP_ROUTER_TARGETS)) {
+      invalidGraph('route-step.targets drifted from STEP_ROUTER_TARGETS')
     }
     // oxlint-disable-next-line typescript/no-non-null-assertion -- router ids matched ROUTER_IDS
     if (!sameStringList(routerTargets.get('route-step-outcome')!, STEP_OUTCOME_ROUTER_TARGETS)) {
@@ -823,6 +905,7 @@ function normalizeState(value: unknown): TurnStepState {
     startsRequestSeries: booleanOf(record.startsRequestSeries, 'startsRequestSeries'),
     requestError: oneOf(record.requestError, REQUEST_ERROR_KINDS, 'requestError'),
     stepEnd: parseStepEnd(record.stepEnd),
+    stepOutcome: parseStepOutcome(record.stepOutcome),
     turnEnd: parseTurnEnd(record.turnEnd),
     route: parseRoute(record.route),
     surfaceGeneration: record.surfaceGeneration === null
@@ -883,6 +966,13 @@ function parseStepEnd(value: unknown): TurnStepStepEnd | null {
   return { kind: oneOf(record.kind, STEP_END_KINDS, 'stepEnd.kind') }
 }
 
+function parseStepOutcome(value: unknown): TurnStepStepOutcome | null {
+  if (value === null) return null
+  const record = asRecord(value, 'stepOutcome')
+  exactKeys(record, ['kind'], 'stepOutcome')
+  return { kind: oneOf(record.kind, STEP_OUTCOME_KINDS, 'stepOutcome.kind') }
+}
+
 function parseTurnEnd(value: unknown): TurnEndReason | null {
   if (value === null) return null
   const record = asRecord(value, 'turnEnd')
@@ -917,6 +1007,7 @@ function parseVisits(value: unknown): TurnStepVisits {
   exactKeys(record, TURN_STEP_NODES, 'visits')
   return {
     'apply-pre-step': nonNegativeInt(record['apply-pre-step'], 'visits.apply-pre-step'),
+    step: nonNegativeInt(record.step, 'visits.step'),
     'apply-step-outcome': nonNegativeInt(record['apply-step-outcome'], 'visits.apply-step-outcome'),
   }
 }

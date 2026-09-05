@@ -132,6 +132,13 @@ export interface ResumeAgentOptions {
   readonly resumeSessionId: SessionId
   /** Per-agent options (model, …). */
   readonly agentOptions?: AgentOptions
+  /**
+   * Optional last-good turn/step checkpoint JSON. Parsed with
+   * `parseTurnStepCheckpoint` before publish. Version or shape errors fail
+   * resume without creating an agent. This seeds in-memory last-good State;
+   * it does not skip `preStep` / `step` and is not a session event.
+   */
+  readonly turnStepCheckpoint?: unknown
   /** Optional creation-only cancellation signal for persistence load/setup; detached before return. */
   readonly signal?: AbortSignal
   /**

@@ -317,6 +317,20 @@ export interface SessionEventMap {
    * so tolerating concurrent writers needs a signal beyond the log.
    */
   'session/end-seed': Record<string, never>
+  /**
+   * In-memory last-good TurnStepCheckpoint after a declared graph node.
+   * Appended by `publishNode` in the agent loop. Ignorable: an older runtime
+   * that does not know this type may safely skip it because the event carries
+   * no surface, tool, or turn-boundary semantics. The data is the frozen
+   * {@link TurnStepCheckpoint} JSON.
+   */
+  'session/checkpoint-node': JsonValue & { schemaVersion: number; node: string; state: JsonValue }
+  /**
+   * In-memory TurnStepTraceEntry after a declared graph node. Appended by
+   * `publishNode` alongside `session/checkpoint-node`. Ignorable. The data
+   * is the frozen {@link TurnStepTraceEntry} JSON.
+   */
+  'session/trace-node': JsonValue & { node: string; turn: number; step: number; startedAt: number; durationMs: number; state: JsonValue }
 }
 
 /** The appendable event-type keys of {@link SessionEventMap}, plugin-merged extensions included. */

@@ -32,6 +32,7 @@ import type {} from '@deepseek-ai/dsh-session-projection'
 import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import type { SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { ReactLoopAgent } from './agent.ts'
+import { parseTurnStepCheckpoint, type TurnStepCheckpoint } from './turn-step-state.ts'
 import { DEFAULT_MAX_PARALLEL_TOOL_CALLS } from './constants.ts'
 
 /** Fiber states that cannot own or serve a new lifecycle. */
@@ -477,7 +478,7 @@ export class AgentLoop extends Service implements AgentFactory {
     await this.waitForDrainingConfiguredIdentity(ownerCtx, sessionId)
     if (!this.ownership.isActive()) return
     try {
-      await this.resumeWith(ownerCtx, persistence, { resumeSessionId: sessionId, agentOptions })
+      await this.resumeWith(ownerCtx, persistence, { resumeSessionId: sessionId, agentOptions: agentOptions })
       return
     } catch (error: unknown) {
       if (!this.ownership.isActive()) return
@@ -519,7 +520,14 @@ export class AgentLoop extends Service implements AgentFactory {
    * BEFORE publication, so a mid-setup unload rolls everything back; `signal`
    * fuses caller cancellation with lifecycle teardown for setup awaits.
    */
-  private prepare(ownerCtx: Context, id: SessionId, options: AgentOptions, session: Session, callerSignal?: AbortSignal): PreparedAgent {
+  private prepare(
+    ownerCtx: Context,
+    id: SessionId,
+    options: AgentOptions,
+    session: Session,
+    callerSignal?: AbortSignal,
+    restoredNodeCheckpoint?: TurnStepCheckpoint,
+  ): PreparedAgent {
     assertAgentOptions(options)
     ownerCtx.fiber.assertActive()
     // Every caller reaches prepare() synchronously from a service method
@@ -609,7 +617,7 @@ export class AgentLoop extends Service implements AgentFactory {
       throw abort.signal.reason instanceof Error ? abort.signal.reason : new Error(String(abort.signal.reason))
     }
     try {
-      const agent = machine = new ReactLoopAgent(loopCtx, id, options, session)
+      const agent = machine = new ReactLoopAgent(loopCtx, id, options, session, restoredNodeCheckpoint)
       machineReady.resolve()
       assertLive()
 
@@ -693,10 +701,11 @@ export class AgentLoop extends Service implements AgentFactory {
     setup: AgentSetup | undefined,
     signal: AbortSignal | undefined,
     source: SessionStartSource,
+    restoredNodeCheckpoint?: TurnStepCheckpoint,
   ): Promise<AgentHandle> {
     using ownedPreparation = preparation
     const session = ownedPreparation.session
-    const prepared = this.prepare(ownerCtx, id, agentOptions, session, signal)
+    const prepared = this.prepare(ownerCtx, id, agentOptions, session, signal, restoredNodeCheckpoint)
     try {
       const setupCommit = await raceAbort(setup?.(prepared.agent.ctx), prepared.signal, id)
       setupCommit?.commit()
@@ -727,6 +736,9 @@ export class AgentLoop extends Service implements AgentFactory {
     persistence: SessionPersistence,
     options: ResumeAgentOptions,
   ): Promise<AgentHandle> {
+    const restoredNodeCheckpoint = options.turnStepCheckpoint === undefined
+      ? undefined
+      : parseTurnStepCheckpoint(options.turnStepCheckpoint)
     const id = options.resumeSessionId
     const published = (async () => {
       // The load may outlive its owner: race it against caller cancellation,
@@ -763,6 +775,7 @@ export class AgentLoop extends Service implements AgentFactory {
           options.setup,
           options.signal,
           'resume',
+          restoredNodeCheckpoint,
         )
       } finally {
         preparation?.[Symbol.dispose]()
