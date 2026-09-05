@@ -317,7 +317,7 @@ describe('turn/step State schema', () => {
   })
 
   it('recordNodeVisit caps apply-pre-step and carries counts across a fresh snapshot', () => {
-    expect(TURN_STEP_VISIT_CAPS).toEqual({ 'apply-pre-step': 256, 'apply-step-outcome': 256 })
+    expect(TURN_STEP_VISIT_CAPS).toEqual({ 'apply-pre-step': 256, step: 256, 'apply-step-outcome': 256 })
 
     const zero = freezeTurnStepState(sampleState({
       visits: { 'apply-pre-step': 0, step: 0, 'apply-step-outcome': 0 },

@@ -102,7 +102,7 @@ describe('agent/request-error', () => {
     expect(agent.session.events.flatMap(event =>
       event.type === 'request/header' ? [event.data.reason] : [])).toEqual(['initial'])
     expect((agent as ReactLoopAgent).nodeTrace.map(entry => entry.node))
-      .toEqual(['apply-pre-step', 'apply-step-outcome'])
+      .toEqual(['apply-pre-step', 'step', 'apply-step-outcome'])
   })
 
   it('lets cancellation win over a retry action', async () => {

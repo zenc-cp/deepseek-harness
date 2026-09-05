@@ -114,7 +114,7 @@ describe('agent/pre-step', () => {
     expect(second?.state.turn).toBe(2)
     expect(second).not.toBe(first)
     expect(seen[1]).toBeNull()
-    expect(loop.nodeTrace.map(entry => entry.node)).toEqual(['apply-pre-step', 'apply-step-outcome'])
+    expect(loop.nodeTrace.map(entry => entry.node)).toEqual(['apply-pre-step', 'step', 'apply-step-outcome'])
     expect(loop.nodeTrace.at(-1)?.state).toBe(second?.state)
   })
 
@@ -149,6 +149,7 @@ describe('agent/pre-step', () => {
     expect(loop.nodeTrace.map(entry => ({ node: entry.node, turn: entry.turn, step: entry.step })))
       .toEqual([
         { node: 'apply-pre-step', turn: 1, step: 1 },
+        { node: 'step', turn: 1, step: 1 },
         { node: 'apply-step-outcome', turn: 1, step: 1 },
       ])
     expect(loop.nodeTrace.every(entry => Number.isSafeInteger(entry.startedAt) && entry.startedAt >= 0)).toBe(true)
@@ -162,8 +163,10 @@ describe('agent/pre-step', () => {
     expect(seen[1]).toEqual([])
     expect(loop.nodeTrace.map(entry => entry.node)).toEqual([
       'apply-pre-step',
+      'step',
       'apply-step-outcome',
       'apply-pre-step',
+      'step',
       'apply-step-outcome',
     ])
   })
