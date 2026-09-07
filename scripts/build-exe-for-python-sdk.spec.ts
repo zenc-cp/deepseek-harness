@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest'
 const root = resolve(import.meta.dirname, '..')
 const script = resolve(root, 'scripts/build-exe-for-python-sdk.ts')
 const temporaryDirectories: string[] = []
+// Dry-run output quotes space-containing argv entries, independently of shell execution.
+const printedNode = process.execPath.includes(' ') ? JSON.stringify(process.execPath) : process.execPath
 
 afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
@@ -32,14 +34,14 @@ describe('Python runtime executable builder CLI', () => {
     )
 
     expect(result.status).toBe(0)
-    expect(result.stdout).toContain(`${process.execPath} C:\\tools\\pnpm.cjs run verify-runtime-closure`)
-    expect(result.stdout).toContain(`${process.execPath} C:\\tools\\pnpm.cjs --filter dsh-python-runtime-closure deploy`)
-    expect(result.stdout).toContain(`${process.execPath} C:\\tools\\pnpm.cjs dlx @yao-pkg/pkg@6.21.0`)
+    expect(result.stdout).toContain(`${printedNode} C:\\tools\\pnpm.cjs run verify-runtime-closure`)
+    expect(result.stdout).toContain(`${printedNode} C:\\tools\\pnpm.cjs --filter dsh-python-runtime-closure deploy`)
+    expect(result.stdout).toContain(`${printedNode} C:\\tools\\pnpm.cjs dlx @yao-pkg/pkg@6.21.0`)
     expect(result.stdout).not.toMatch(/pnpm\.cmd/i)
   })
 
   it('resolves the pnpm package behind a Windows command shim', () => {
-    const setup = mkdtempSync(join(tmpdir(), 'dsh-pnpm-home-'))
+    const setup = mkdtempSync(join(tmpdir(), 'dsh pnpm home-'))
     temporaryDirectories.push(setup)
     const home = join(setup, 'node_modules', '.bin')
     const entrypoint = join(setup, 'node_modules', 'pnpm', 'bin', 'pnpm.mjs')
@@ -55,7 +57,7 @@ describe('Python runtime executable builder CLI', () => {
     )
 
     expect(result.status).toBe(0)
-    expect(result.stdout).toContain(`${process.execPath} ${entrypoint} run verify-runtime-closure`)
+    expect(result.stdout).toContain(`${printedNode} ${JSON.stringify(entrypoint)} run verify-runtime-closure`)
     expect(result.stdout).not.toMatch(/pnpm\.cmd/i)
   })
 

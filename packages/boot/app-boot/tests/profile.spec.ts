@@ -897,7 +897,9 @@ describe('healProfilesModuleFallback', () => {
     }
   })
 
-  it('replaces plain-node links and stale managed proxies in packaged mode', async () => {
+  // Three real filesystem repair passes exceeded 5 seconds in the full Windows
+  // suite; keep the semantic assertions and scope the integration budget here.
+  it('replaces plain-node links and stale managed proxies in packaged mode', { timeout: 30_000 }, async () => {
     const anchor = stageInstallation({ 'bundle-a': { patch: '[]\n' } })
     const home = tmp()
     await healProfilesModuleFallback({ installAnchor: anchor, home })
@@ -922,7 +924,8 @@ describe('healProfilesModuleFallback', () => {
     }
   })
 
-  it('replaces a managed packaged proxy with a plain-node symlink', async () => {
+  // Reverse conversion exercises the same real filesystem repair as above.
+  it('replaces a managed packaged proxy with a plain-node symlink', { timeout: 30_000 }, async () => {
     const anchor = stageInstallation({ 'bundle-a': { patch: '[]\n' } })
     const home = tmp()
     const fallback = join(home, 'profiles', 'node_modules', 'bundle-a')
