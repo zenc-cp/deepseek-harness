@@ -8,6 +8,23 @@ const runnerPrivatePnpmDestination = /^\$\{\{ runner\.temp \}\}\/setup-pnpm-\$\{
 const nativeWindowsPnpmDestination = '${{ runner.temp }}/setup-pnpm-js-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}'
 
 describe('CI workflow', () => {
+  it('keeps fork diagnostics branch-scoped, read-only, and failure preserving', () => {
+    const workflow = loadWorkflow('.github/workflows/fork-pwsh-diagnostics.yml')
+    expect(workflow.on).toEqual({ pull_request: { types: ['opened', 'synchronize', 'reopened'] } })
+    expect(workflow.permissions).toEqual({ contents: 'read' })
+    if (!isRecord(workflow.jobs) || !isRecord(workflow.jobs.focused)) throw new TypeError('Diagnostic job required')
+    const job = workflow.jobs.focused
+    expect(job.if).toBe("github.repository == 'zenc-cp/deepseek-harness' && github.head_ref == 'fix/zenc-fork-ci' && github.event.pull_request.head.repo.full_name == github.repository")
+    if (!Array.isArray(job.steps)) throw new TypeError('Steps required')
+    const steps = job.steps.filter(isRecord)
+    expect(steps.find(step => step.name === 'Preserve failure status')).toMatchObject({ if: 'always()' })
+    expect(steps.at(-1)?.run).toContain('exit 1')
+    const text = JSON.stringify(workflow)
+    expect(text).not.toContain('secrets.')
+    expect(text).not.toContain('--update')
+    expect(text).not.toContain('DSH_SNAPSHOT=refresh')
+  })
+
   it('uses standard hosted runners in the personal fork without removing CI gates', () => {
     const workflow = loadWorkflow('.github/workflows/ci.yml')
     if (!isRecord(workflow.jobs)) throw new TypeError('CI jobs required')

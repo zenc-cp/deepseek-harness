@@ -544,6 +544,14 @@ jobs:
       - name: Run Windows coverage
         shell: pwsh
         run: pnpm run check:ci:coverage
+      - name: Retain failed fork coverage reports
+        if: failure() && github.repository == 'zenc-cp/deepseek-harness'
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-coverage-failure-${{ github.run_attempt }}
+          path: coverage/.partitioned/partition-*.report.json
+          retention-days: 3
+          if-no-files-found: warn
       - name: Save coverage duration history
         # Coverage flakes must not prevent the cache from building; the
         # measured durations remain useful even when a partition failed. The
