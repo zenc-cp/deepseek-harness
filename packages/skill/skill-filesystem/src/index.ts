@@ -15,6 +15,7 @@ import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import type { Context } from '@deepseek-ai/cordis'
 import chokidar from 'chokidar'
+import { WatchRecovery } from './watch-recovery.ts'
 import z from '@deepseek-ai/schemastery'
 import type Schema from '@deepseek-ai/schemastery'
 import { parse as parseYaml } from 'yaml'
@@ -500,9 +501,20 @@ class SkillWatchManager {
       usePolling: this.config.usePolling,
       interval: this.config.pollIntervalMs,
     })
+    const recovery = new WatchRecovery(
+      mode.anchor, this.config.followSymlinks, state.root.skipSystem === true,
+      Math.max(10, this.config.stabilityThresholdMs),
+      () => { this.queueInvalidation() },
+      (error) => { this.handleWatcherError(state, error) },
+    )
+    const onRaw = (): void => { recovery.observe() }
     const handle: WatchHandle = {
       mode,
-      close: () => watcher.close(),
+      close: async () => {
+        watcher.off('raw', onRaw)
+        await recovery.close()
+        await watcher.close()
+      },
     }
     let ready = false
     const readiness = Promise.withResolvers<undefined>()
@@ -530,6 +542,9 @@ class SkillWatchManager {
     }
     try {
       await readiness.promise
+      await recovery.initialize()
+      signal.throwIfAborted()
+      watcher.on('raw', onRaw)
     } catch (error) {
       await this.closeWatcher(handle)
       throw error
