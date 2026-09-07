@@ -1,4 +1,8 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { spawnSync } from 'node:child_process'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { PassThrough } from 'node:stream'
 import { Context } from '@deepseek-ai/cordis'
 import { scrubbedParentEnv, SubprocessRuntime } from '@deepseek-ai/dsh-subprocess'
@@ -49,6 +53,83 @@ class StubSubprocessRuntime extends SubprocessRuntime {
     }
   }
 }
+
+describe('Git indexed environment scrubbing', () => {
+  afterEach(() => vi.unstubAllEnvs())
+
+  it.each([
+    ['GIT_CONFIG_COUNT', 'GIT_CONFIG_KEY_0', 'GIT_CONFIG_VALUE_0'],
+    ['git_config_count', 'git_config_key_0', 'git_config_value_0'],
+    ['Git_Config_Count', 'Git_Config_Key_12', 'Git_Config_Value_12'],
+  ])('removes the entire ambient indexed family starting with %s', (count, key, value) => {
+    vi.stubEnv(count, '1')
+    vi.stubEnv(key, 'http.extraHeader')
+    vi.stubEnv(value, 'Authorization: synthetic-test-only')
+    vi.stubEnv('SCRUB_PROBE_PLAIN', 'visible')
+
+    const env = scrubbedParentEnv()
+    const indexedNames = Object.keys(env).filter(name => /^GIT_CONFIG_(?:COUNT|(?:KEY|VALUE)_\d+)$/i.test(name))
+    expect(indexedNames).toEqual([])
+    expect(env.SCRUB_PROBE_PLAIN).toBe('visible')
+    expect(env.PATH).toBeDefined()
+  })
+
+  it('also removes orphaned values and malformed counts without parsing their contents', () => {
+    vi.stubEnv('GIT_CONFIG_COUNT', 'invalid-count')
+    vi.stubEnv('GIT_CONFIG_KEY_0', undefined)
+    vi.stubEnv('GIT_CONFIG_VALUE_0', 'synthetic-orphan')
+    vi.stubEnv('GIT_CONFIG_VALUE_999', 'synthetic-out-of-range')
+    const env = scrubbedParentEnv()
+    expect(Object.keys(env).filter(name => /^GIT_CONFIG_(?:COUNT|(?:KEY|VALUE)_\d+)$/i.test(name))).toEqual([])
+  })
+
+  it('preserves unrelated Git controls', () => {
+    vi.stubEnv('GIT_TERMINAL_PROMPT', '0')
+    vi.stubEnv('GIT_CONFIG_NOSYSTEM', '1')
+    const env = scrubbedParentEnv()
+    expect(env.GIT_TERMINAL_PROMPT).toBe('0')
+    expect(env.GIT_CONFIG_NOSYSTEM).toBe('1')
+  })
+
+  it('lets Git parse configuration after sanitizing a synthetic indexed entry', () => {
+    vi.stubEnv('GIT_CONFIG_COUNT', '1')
+    vi.stubEnv('GIT_CONFIG_KEY_0', 'test.scrubProbe')
+    vi.stubEnv('GIT_CONFIG_VALUE_0', 'synthetic-test-only')
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-scrub-git-'))
+    const config = join(dir, 'empty.gitconfig')
+    try {
+      writeFileSync(config, '')
+      const result = spawnSync('git', ['config', '--list'], {
+        cwd: dir,
+        env: { ...scrubbedParentEnv(), GIT_CONFIG_NOSYSTEM: '1', GIT_CONFIG_GLOBAL: config },
+        encoding: 'utf8',
+        stdio: ['ignore', 'ignore', 'pipe'],
+      })
+      expect(result.error).toBeUndefined()
+      expect(result.status, result.stderr).toBe(0)
+
+      // Explicit, complete overrides still belong to the caller after the scrub.
+      const explicit = spawnSync('git', ['config', '--get', 'test.scrubProbe'], {
+        cwd: dir,
+        env: {
+          ...scrubbedParentEnv(),
+          GIT_CONFIG_NOSYSTEM: '1',
+          GIT_CONFIG_GLOBAL: config,
+          GIT_CONFIG_COUNT: '1',
+          GIT_CONFIG_KEY_0: 'test.scrubProbe',
+          GIT_CONFIG_VALUE_0: 'explicit-test-value',
+        },
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      expect(explicit.error).toBeUndefined()
+      expect(explicit.status, explicit.stderr).toBe(0)
+      expect(explicit.stdout.trim()).toBe('explicit-test-value')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('SubprocessRuntime seam', () => {
   it('a concrete subclass registers as ctx.subprocess and serves the abstract API', async () => {

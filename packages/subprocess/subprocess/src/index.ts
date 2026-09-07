@@ -43,9 +43,14 @@ export type {
  */
 export const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i
 
+// Git's indexed configuration is one unit: scrubbing KEY_n alone leaves an
+// invalid COUNT and potentially credential-bearing VALUE_n entries. Drop the
+// entire ambient family; callers may still supply a deliberate explicit env.
+const INDEXED_GIT_CONFIG_PATTERN = /^GIT_CONFIG_(?:COUNT|(?:KEY|VALUE)_\d+)$/i
+
 /**
- * The ambient parent environment minus credential-shaped names and minus all
- * `DSH_*` names — the canonical base every harness child starts from. `PATH`,
+ * The ambient parent environment minus credential-shaped names, all `DSH_*`
+ * names, and Git's indexed configuration — the canonical base for children. `PATH`,
  * `HOME`, locale, and proxy variables survive, so child CLIs run normally;
  * harness identity never leaks implicitly (a deliberately forwarded
  * credential or current `DSH_*` fact goes through the spec's explicit `env`,
@@ -60,7 +65,10 @@ export const SENSITIVE_ENV_PATTERN = /KEY|PASSWORD|SECRET|TOKEN/i
 export function scrubbedParentEnv(): Record<string, string> {
   const env: Record<string, string> = {}
   for (const [key, value] of Object.entries(process.env)) {
-    if (value !== undefined && !SENSITIVE_ENV_PATTERN.test(key) && !key.toUpperCase().startsWith(DSH_ENV_PREFIX)) env[key] = value
+    if (value !== undefined
+      && !SENSITIVE_ENV_PATTERN.test(key)
+      && !key.toUpperCase().startsWith(DSH_ENV_PREFIX)
+      && !INDEXED_GIT_CONFIG_PATTERN.test(key)) env[key] = value
   }
   return env
 }
