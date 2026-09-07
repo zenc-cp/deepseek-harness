@@ -8,6 +8,62 @@ const runnerPrivatePnpmDestination = /^\$\{\{ runner\.temp \}\}\/setup-pnpm-\$\{
 const nativeWindowsPnpmDestination = '${{ runner.temp }}/setup-pnpm-js-${{ github.run_id }}-${{ github.run_attempt }}-${{ github.job }}'
 
 describe('CI workflow', () => {
+  it('uses standard hosted runners in the personal fork without removing CI gates', () => {
+    const workflow = loadWorkflow('.github/workflows/ci.yml')
+    if (!isRecord(workflow.jobs)) throw new TypeError('CI jobs required')
+    for (const name of ['node-24', 'node-24-coverage', 'node-24-consumers', 'windows-build', 'windows-coverage', 'windows-native-tests', 'windows-observational']) {
+      const job = workflow.jobs[name]
+      if (!isRecord(job)) throw new TypeError(`Missing ${name}`)
+      const runner = name.startsWith('windows-') ? 'windows-2025' : 'ubuntu-24.04'
+      expect(job['runs-on']).toContain(`github.repository == 'zenc-cp/deepseek-harness' && '${runner}'`)
+      expect(job.if).toBe("github.event_name == 'pull_request'")
+    }
+  })
+
+  it('bounds fork concurrency while retaining upstream budgets', () => {
+    const workflow = loadWorkflow('.github/workflows/ci.yml')
+    if (!isRecord(workflow.jobs)) throw new TypeError('CI jobs required')
+    const budgets = {
+      'node-24': { DSH_GATE_CONCURRENCY: ['1', '8'] },
+      'node-24-consumers': { DSH_GATE_CONCURRENCY: ['1', '10'], DSH_WEB_SNAPSHOT_WORKERS: ['2', '6'] },
+      'node-24-coverage': { DSH_GATE_CONCURRENCY: ['1', '3'], DSH_COVERAGE_MAX_WORKERS: ['2', '6'], DSH_COVERAGE_PARTITIONS: ['2', '4'] },
+      'windows-coverage': { DSH_GATE_CONCURRENCY: ['1', '3'], DSH_COVERAGE_MAX_WORKERS: ['2', '6'], DSH_COVERAGE_PARTITIONS: ['2', '4'] },
+    }
+    for (const [name, expected] of Object.entries(budgets)) {
+      const job = workflow.jobs[name]
+      if (!isRecord(job) || !isRecord(job.env)) throw new TypeError(`Missing env for ${name}`)
+      for (const [key, [fork, upstream]] of Object.entries(expected)) {
+        expect(job.env[key]).toBe(`\u0024{{ github.repository == 'zenc-cp/deepseek-harness' && '${fork}' || '${upstream}' }}`)
+      }
+    }
+  })
+
+  it('skips organization Project jobs only in the personal fork', () => {
+    for (const [file, name] of [['issue-policy', 'policy'], ['issue-lifecycle', 'lifecycle']] as const) {
+      const workflow = loadWorkflow(`.github/workflows/${file}.yml`)
+      if (!isRecord(workflow.jobs)) throw new TypeError('Jobs required')
+      expect(workflow.jobs[name]).toMatchObject({ if: "github.repository != 'zenc-cp/deepseek-harness'" })
+    }
+  })
+
+  it('keeps preview builds but gates every credential-bearing preview step in the fork', () => {
+    const workflow = loadWorkflow('.github/workflows/build-preview-cloudflare.yml')
+    if (!isRecord(workflow.jobs) || !isRecord(workflow.jobs.preview)) throw new TypeError('Preview required')
+    const preview = workflow.jobs.preview
+    expect(preview['runs-on']).toContain("github.repository == 'zenc-cp/deepseek-harness' && 'ubuntu-24.04'")
+    expect(preview.name).toContain('preview build (no deployment)')
+    if (!Array.isArray(preview.steps)) throw new TypeError('Steps required')
+    const steps = preview.steps.filter(isRecord)
+    for (const name of ['Build workspace', 'Build the preview page and pack the VFS image']) {
+      const step = steps.find(step => step.name === name)
+      expect(step).toBeDefined()
+      expect(step?.if).toBeUndefined()
+    }
+    const credentialSteps = steps.filter(step => JSON.stringify(step).includes('secrets.'))
+    expect(credentialSteps).toHaveLength(3)
+    for (const step of credentialSteps) expect(step.if).toBe("github.repository != 'zenc-cp/deepseek-harness'")
+  })
+
   it('isolates every pnpm action setup destination per runner', () => {
     const files = ['.github/workflows/ci.yml', '.github/workflows/ci-master.yml']
     const setups: Array<{ jobName: string; step: unknown }> = []
@@ -150,7 +206,7 @@ describe('CI workflow', () => {
 
     // windows-coverage uses the lower 4-partition profile.
     expect(windowsCoverage.name).toBe('windows node 24 / coverage')
-    expect(windowsCoverage.env).toMatchObject({ DSH_COVERAGE_PARTITIONS: '4' })
+    expect(windowsCoverage.env).toMatchObject({ DSH_COVERAGE_PARTITIONS: "${{ github.repository == 'zenc-cp/deepseek-harness' && '2' || '4' }}" })
     const coverageSteps = windowsCoverage.steps as unknown[]
     const coverageCommands = coverageSteps.filter((step): step is Record<string, unknown> & { run: string } => (
       isRecord(step) && typeof step.run === 'string'
@@ -683,7 +739,7 @@ describe('Issue lifecycle workflow', () => {
     // never mint a Project/Issue App token nor touch the board.
     expect(lifecycle.on).toHaveProperty('pull_request')
     expect(lifecycle.on).toHaveProperty('pull_request_review')
-    expect(lifecycleJob.if).toBeUndefined()
+    expect(lifecycleJob.if).toBe("github.repository != 'zenc-cp/deepseek-harness'")
     // Keep the subscription-type gates: issue-lifecycle does not re-subscribe
     // ready_for_review (issue-policy owns that) and only reacts to submitted
     // review events.

@@ -35,6 +35,8 @@ concurrency:
 
 jobs:
   lifecycle:
+    # The personal fork does not operate the upstream organization Project.
+    if: github.repository != 'zenc-cp/deepseek-harness'
     name: Issue lifecycle
     # Runs on every pull_request_review event so the check reports success rather
     # than a gray "skipped" segment. The token-creating and board-mutating steps
