@@ -39,7 +39,7 @@ jobs:
       - name: Focused terminal readiness test
         id: terminal
         continue-on-error: true
-        run: pnpm exec vitest run packages/terminal/terminal-bash/tests/local.spec.ts --testNamePattern "bootstraps a persistent pwsh" --reporter=default --reporter=json --outputFile=diagnostics/terminal.json
+        run: pnpm exec vitest run --config vitest.pwsh-diagnostic.config.ts --reporter=default --reporter=json --outputFile=diagnostics/terminal.json
       - name: Build snapshot prerequisites
         id: build
         continue-on-error: true
