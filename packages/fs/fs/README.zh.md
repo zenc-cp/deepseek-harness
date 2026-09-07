@@ -63,7 +63,7 @@ kind: "package-reference"
 
 ### 调用流程
 
-每个普通操作都以 `resolve(path, { cwd })` 开始，它产生稳定的 `FsTarget`（不透明 `targetKey` 加用于模型/UI 输出的 `displayPath`）；经不同路径到达同一文件会产生相同 key。`processPathFromHostPath(hostPath)` 在后端共享或显式映射宿主文件时，单独把绝对宿主文件映射进此执行世界，否则返回 `undefined`。读取随后执行 `stat` → `readText`/`streamText`/`readBytes`，列出执行 `listDir`，变更则经过每个目标一个临界区：先检查可选防护，应用新内容，再原子发布结果。
+每个普通操作都以 `resolve(path, { cwd })` 开始，它产生稳定的 `FsTarget`（不透明 `targetKey` 加用于模型/UI 输出的 `displayPath`）；经不同路径到达同一文件会产生相同 key。`processPathFromHostPath(hostPath)` 在后端共享或显式映射宿主文件时，单独把绝对宿主文件映射进此执行世界，否则返回 `undefined`。读取先用 `stat` 获取元数据，再优先使用可选的内容绑定快照；提供方返回 `undefined` 时，保留 `readText`/`streamText`/`readBytes` 及元数据观察记录。列出使用 `listDir`。变更在每目标临界区内检查可选防护并原子发布。
 
 ### `fs/*` 策略事件
 
@@ -109,8 +109,8 @@ kind: "package-reference"
 
 这些限制说明该约定何时不合适，或何时需要特别的运维注意。它们是当前包约束，不是通用文件系统对比或任务积压。
 
-- **变更操作约定只支持文本**：文本读取和两个变更操作都以 `FS_NOT_TEXT` 拒绝二进制/非 UTF-8 内容；`readBytes` 是唯一的原始字节原语，二进制安全的变更操作仍延期（见[工具 schema Agent Note](../../../.agents/notes/implemented/feature/2026-06-17-filesystem-tool-schemas.zh.md)）。
-- **只有十三个原语**：没有删除、重命名、复制或监视；`listDir` 只列出一层，递归、glob、分页与搜索不在范围内（见[目录列出笔记](../../../.agents/notes/archived/architecture/2026-07-03-filesystem-directory-listing-seam.md)）。
+- **变更载荷只支持 UTF-8**：变更接受字符串，字面量编辑要求文本内容。原始字节读取可携带内容版本，也可不携带；面向字节的变更操作仍延期（见[工具 schema Agent Note](../../../.agents/notes/implemented/feature/2026-06-17-filesystem-tool-schemas.zh.md)）。
+- **操作范围有限**：没有删除、重命名、复制或监视；`listDir` 只列出一层，递归、glob、分页与搜索不在范围内（见[目录列出笔记](../../../.agents/notes/archived/architecture/2026-07-03-filesystem-directory-listing-seam.md)）。
 - **没有 I/O deadline**：该 seam 不启动超时；取消只是每个原语上尽力而为的可选 `AbortSignal`（见[fs 能力族立场](../README.zh.md)）。
 - **先解析后操作使远程后端每次工具调用需要两次往返**：折叠或缓存解析由这种后端自行决定。
 

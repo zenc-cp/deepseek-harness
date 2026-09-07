@@ -64,7 +64,7 @@ This section explains the design decisions behind the editor tool and points at 
 
 ### Design concept
 
-The tool is one schema with four commands over `ctx.fs`. Mutations never touch the provider directly with their own assumptions: each one runs the `fs/write-intent` or `fs/edit-intent` waterfall to obtain the policy plugin's guard, resolves the per-call sandbox policy when the mounted `ctx.fs` confines, and delegates enforcement to the provider. `str_replace` and `insert` additionally re-read the file and use the observed version as the compare-and-swap basis when no policy plugin supplies a guard.
+The tool is one schema with four commands over `ctx.fs`. Mutations never touch the provider directly with their own assumptions: each one runs the `fs/write-intent` or `fs/edit-intent` waterfall to obtain the policy plugin's guard, resolves the per-call sandbox policy when the mounted `ctx.fs` confines, and delegates enforcement to the provider. Text reads prefer content-bound snapshots and otherwise retain metadata-based behavior. `str_replace` and `insert` use the revision of their internal read as the guard when no policy plugin supplies one; a policy-supplied observation is never replaced by that internal read.
 
 ### Source map
 
@@ -74,7 +74,7 @@ The tool is one schema with four commands over `ctx.fs`. Mutations never touch t
 
 ### How each command runs
 
-Every command resolves the absolute path first; mutations then follow one shared flow — policy guard, provider enforcement, then an `fs/observed` record on success — while `view` only stats and renders. The entire tool — schema, command dispatch, and view rendering — lives in `src/index.ts`.
+Every command resolves the absolute path first; mutations then follow one shared flow — policy guard, provider enforcement, then an `fs/observed` record on success — while `view` stats, reads, renders, and records an observation only after success. The entire tool — schema, command dispatch, and view rendering — lives in `src/index.ts`.
 
 </details>
 

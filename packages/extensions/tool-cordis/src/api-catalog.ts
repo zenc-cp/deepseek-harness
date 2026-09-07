@@ -910,6 +910,18 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         returns: 'the chunk iterable, decoded and validated like {@link readText}.',
       },
       {
+        signature: 'streamTextSnapshot(_target: FsTarget, _signal?: AbortSignal): AsyncGenerator<string, FsVersion, void> | undefined',
+        description: 'Optional content-bound read. The generator\'s normal completion value is the opaque revision of the whole raw file underlying the decoded chunks. Capture that return value only after EOF; cancellation or early return grants no observation. This does not promise a transactional read against external writers.',
+        parameters: [{ name: '_target', description: 'the resolved regular file to read.' }, { name: '_signal', description: 'aborts reading, including between chunks.' }],
+        returns: 'the versioned stream, or undefined when the backend uses legacy metadata observations.',
+      },
+      {
+        signature: 'readBytesSnapshot(_target: FsTarget, _signal: AbortSignal | undefined, _maxBytes: number): Promise<FsBytesSnapshot> | undefined',
+        description: 'Optional bounded raw read with an immutable revision of the returned bytes.',
+        parameters: [{ name: '_target', description: 'the resolved regular file to read.' }, { name: '_signal', description: 'aborts the read.' }, { name: '_maxBytes', description: 'inclusive cap on the complete raw content.' }],
+        returns: 'the complete snapshot, or undefined when the backend uses legacy metadata observations.',
+      },
+      {
         signature: 'abstract readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array>',
         description: 'Read the whole regular file as raw bytes with no decoding or binary rejection. The bound lives at this seam so a backend can never buffer an unbounded file: a target known or discovered to exceed `maxBytes` fails with `FS_TOO_LARGE` instead of returning a truncated result.',
         parameters: [{ name: 'target', description: 'the resolved target to read.' }, { name: 'signal', description: 'aborts the read.' }, { name: 'maxBytes', description: 'inclusive byte cap on the complete content.' }],
@@ -4036,6 +4048,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface FinishReasonMap {\n    \'stop\': {\n        kind: \'stop\';\n    };\n    \'tool-calls\': {\n        kind: \'tool-calls\';\n    };\n    \'max-tokens\': {\n        kind: \'max-tokens\';\n    };\n    \'aborted\': {\n        kind: \'aborted\';\n        failure: LlmFailure;\n    };\n    \'error\': {\n        kind: \'error\';\n        failure: LlmFailure;\n    };\n}',
   },
   {
+    name: 'FsBytesSnapshot',
+    declaration: 'export interface FsBytesSnapshot {\n    bytes: Uint8Array;\n    version: FsVersion;\n}',
+  },
+  {
     name: 'FsDirEntry',
     declaration: 'export interface FsDirEntry {\n    name: string;\n    type: \'file\' | \'directory\' | \'other\';\n    target: FsTarget;\n    version?: FsVersion;\n    size?: number;\n}',
   },
@@ -4729,7 +4745,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'ResumeAgentOptions',
-    declaration: 'export interface ResumeAgentOptions {\n    readonly resumeSessionId: SessionId;\n    readonly agentOptions?: AgentOptions;\n    readonly signal?: AbortSignal;\n    readonly setup?: AgentSetup;\n}',
+    declaration: 'export interface ResumeAgentOptions {\n    readonly resumeSessionId: SessionId;\n    readonly agentOptions?: AgentOptions;\n    readonly turnStepCheckpoint?: unknown;\n    readonly signal?: AbortSignal;\n    readonly setup?: AgentSetup;\n}',
   },
   {
     name: 'RunnerFailureRule',
@@ -4865,7 +4881,7 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   },
   {
     name: 'SessionEventMap',
-    declaration: 'export interface SessionEventMap {\n    \'turn/start\': {\n        turn: number;\n    };\n    \'turn/end\': {\n        turn: number;\n        reason: TurnEndReason;\n    };\n    \'step/start\': {\n        turn: number;\n        step: number;\n    };\n    \'step/end\': {\n        turn: number;\n        step: number;\n    };\n    \'user/message\': UserMessage;\n    \'assistant/chunk\': {\n        turn: number;\n        step: number;\n        chunk: StreamChunk;\n    };\n    \'assistant/message\': {\n        turn: number;\n        step: number;\n        message: AssistantMessage;\n        usage?: TokenUsage;\n        interrupted?: true;\n    };\n    \'tool/call\': {\n        turn: number;\n        step: number;\n        callId: ToolCallId;\n        name: string;\n        arguments: string;\n    };\n    \'tool/result\': {\n        turn: number;\n        step: number;\n        message: ToolResultMessage;\n        error?: {\n            name: string;\n            code: string;\n        };\n        meta?: JsonValue;\n    };\n    \'request/header\': {\n        header: EpochHeader;\n        reason: RequestHeaderReason;\n        startsSeries?: true;\n    };\n    \'request/context\': RequestContext;\n    \'session/end-seed\': Record<string, never>;\n}',
+    declaration: 'export interface SessionEventMap {\n    \'turn/start\': {\n        turn: number;\n    };\n    \'turn/end\': {\n        turn: number;\n        reason: TurnEndReason;\n    };\n    \'step/start\': {\n        turn: number;\n        step: number;\n    };\n    \'step/end\': {\n        turn: number;\n        step: number;\n    };\n    \'user/message\': UserMessage;\n    \'assistant/chunk\': {\n        turn: number;\n        step: number;\n        chunk: StreamChunk;\n    };\n    \'assistant/message\': {\n        turn: number;\n        step: number;\n        message: AssistantMessage;\n        usage?: TokenUsage;\n        interrupted?: true;\n    };\n    \'tool/call\': {\n        turn: number;\n        step: number;\n        callId: ToolCallId;\n        name: string;\n        arguments: string;\n    };\n    \'tool/result\': {\n        turn: number;\n        step: number;\n        message: ToolResultMessage;\n        error?: {\n            name: string;\n            code: string;\n        };\n        meta?: JsonValue;\n    };\n    \'request/header\': {\n        header: EpochHeader;\n        reason: RequestHeaderReason;\n        startsSeries?: true;\n    };\n    \'request/context\': RequestContext;\n    \'session/end-seed\': Record<string, never>;\n    \'session/checkpoint-node\': JsonValue & {\n        schemaVersion: number;\n        node: string;\n        state: JsonValue;\n    };\n    \'session/trace-node\': JsonValue & {\n        node: string;\n        turn: number;\n        step: number;\n        startedAt: number;\n        durationMs: number;\n        state: JsonValue;\n /* …truncated — full shape in source */',
   },
   {
     name: 'SessionEventMetadataFilter',

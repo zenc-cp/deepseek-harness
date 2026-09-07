@@ -214,6 +214,21 @@ async function listDirectory(
   return `Here're the files and directories up to 2 levels deep in ${target.displayPath}, excluding hidden items, node_modules, and Python cache directories:\n${listing}\n`
 }
 
+async function readTextRevision(
+  ctx: Context,
+  target: FsTarget,
+  info: FsInfo,
+  signal: AbortSignal,
+): Promise<{ content: string; version: FsInfo['version'] }> {
+  const snapshot = ctx.fs.streamTextSnapshot(target, signal)
+  if (snapshot === undefined) return { content: await ctx.fs.readText(target, signal), version: info.version }
+  let content = ''
+  let version = info.version
+  const chunks = (async function* () { version = yield* snapshot })()
+  for await (const chunk of chunks) content += chunk
+  return { content, version }
+}
+
 async function viewPath(
   ctx: Context,
   path: string,
@@ -232,9 +247,10 @@ async function viewPath(
   if (info.type !== 'file') {
     throw new FsError(`cannot view "${target.displayPath}": not a regular file or directory`, 'FS_NOT_REGULAR_FILE')
   }
-  const content = await ctx.fs.readText(target, exec.signal)
-  ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec)
-  return formatFileView(target.displayPath, content, maxOutputChars, viewRange)
+  const { content, version } = await readTextRevision(ctx, target, info, exec.signal)
+  const view = formatFileView(target.displayPath, content, maxOutputChars, viewRange)
+  ctx.emit('fs/observed', target, { kind: 'present', version }, exec)
+  return view
 }
 
 async function createFile(
@@ -292,7 +308,7 @@ async function replaceInFile(
   if (info.type !== 'file') {
     throw new FsError(`cannot edit "${target.displayPath}": not a regular file`, 'FS_NOT_REGULAR_FILE')
   }
-  const before = await ctx.fs.readText(target, exec.signal)
+  const { content: before, version } = await readTextRevision(ctx, target, info, exec.signal)
   const offsets = matchOffsets(before, oldValue)
   const offset = offsets[0]
   if (offset === undefined) {
@@ -314,7 +330,7 @@ async function replaceInFile(
       target,
       before.slice(0, offset) + newValue + before.slice(offset + oldValue.length),
       intent === undefined
-        ? { kind: 'replaceIfVersion', version: info.version }
+        ? { kind: 'replaceIfVersion', version }
         : { kind: 'replaceIfVersion', version: intent.version },
       exec.signal,
       sandboxPolicy,
@@ -343,7 +359,7 @@ async function insertInFile(
   if (info.type !== 'file') {
     throw new FsError(`cannot insert into "${target.displayPath}": not a regular file`, 'FS_NOT_REGULAR_FILE')
   }
-  const before = await ctx.fs.readText(target, exec.signal)
+  const { content: before, version } = await readTextRevision(ctx, target, info, exec.signal)
   const lines = before.split('\n')
   if (!Number.isInteger(insertLine) || insertLine < 0 || insertLine > lines.length) {
     throw new Error(
@@ -356,7 +372,7 @@ async function insertInFile(
     ...lines.slice(insertLine),
   ].join('\n')
   const expected: FsWriteIntent = intent === undefined
-    ? { kind: 'replaceIfVersion', version: info.version }
+    ? { kind: 'replaceIfVersion', version }
     : { kind: 'replaceIfVersion', version: intent.version }
   let outcome
   try {

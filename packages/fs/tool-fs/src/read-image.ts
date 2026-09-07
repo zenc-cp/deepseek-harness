@@ -212,7 +212,8 @@ export function applyReadImageTool(ctx: Context): void {
       // The tool result is one message carrying one image, so the per-message
       // aggregate bound applies beside the per-image bound.
       const byteCap = Math.min(attachments.imageLimits.maxImageBytes, attachments.imageLimits.maxMessageImageBytes)
-      const data = await ctx.fs.readBytes(target, exec.signal, byteCap)
+      const snapshot = await ctx.fs.readBytesSnapshot(target, exec.signal, byteCap)
+      const data = snapshot?.bytes ?? await ctx.fs.readBytes(target, exec.signal, byteCap)
       // Persist before returning: the image block must reference a durably
       // committed object by the time the tool/result event is appended.
       let ref: ImageAttachmentRef
@@ -254,7 +255,7 @@ export function applyReadImageTool(ctx: Context): void {
           { cause: error },
         )
       }
-      ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec)
+      ctx.emit('fs/observed', target, { kind: 'present', version: snapshot?.version ?? info.version }, exec)
       const value: ImageReadValue = {
         path: target.displayPath,
         image: {

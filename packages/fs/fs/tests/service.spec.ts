@@ -95,6 +95,15 @@ describe('FileSystem provider seam', () => {
     expect(await fs.readText(target)).toBe('hi')
   })
 
+  it('keeps versioned reads opt-in for legacy backends', async () => {
+    const ctx = new Context()
+    const fiber = await ctx.plugin(FakeFileSystem)
+    const target = await ctx.fs.resolve('a.txt')
+    expect(ctx.fs.streamTextSnapshot(target)).toBeUndefined()
+    expect(ctx.fs.readBytesSnapshot(target, undefined, 100)).toBeUndefined()
+    await fiber.dispose()
+  })
+
   it('throws when a second implementation is loaded (duplicate service)', async () => {
     const ctx = new Context()
     await ctx.plugin(FakeFileSystem)

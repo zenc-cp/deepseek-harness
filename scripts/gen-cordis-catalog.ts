@@ -372,6 +372,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   CompactionTrigger: 'compaction.md',
   PruneResult: 'compaction.md',
   FileReadOutcome: 'filesystem.md',
+  FsBytesSnapshot: 'filesystem.md',
   FsDirEntry: 'filesystem.md',
   FsEditOutcome: 'filesystem.md',
   FsEditRequest: 'filesystem.md',
@@ -632,6 +633,7 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
 /** TypeScript lib and pinned framework types with no repository-owned data page. */
 export const FOUNDATION_TYPE_NAMES: ReadonlySet<string> = new Set([
   'AbortSignal',
+  'AsyncGenerator',
   'AsyncIterable',
   'Context',
   'Error',

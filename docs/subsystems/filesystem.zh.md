@@ -44,10 +44,9 @@ type FsTargetKey = Branded<'FsTargetKey'>
 ```ts type-equiv
 /**
  * Opaque file-version token — the freshness token a write/edit guards against.
- * The local backend derives it from high-resolution stat identity and freshness
- * fields; a remote backend might use a revision id. The policy layer records it
- * for stale checks; consumers may display related metadata but MUST NOT
- * interpret this token.
+ * The local backend supports legacy metadata tokens and content-bound snapshot
+ * and mutation tokens; a remote backend might use a revision id. The policy
+ * layer records the token unchanged. Consumers MUST NOT interpret or log it.
  */
 type FsVersion = Branded<'FsVersion'>
 ```
@@ -110,6 +109,23 @@ interface FsDirEntry {
   size?: number
 }
 ```
+
+<a id="content-bound-reads-provider-contract"></a>
+## 与内容绑定的读取（提供方约定）
+
+`streamTextSnapshot` 可选地返回异步生成器，其正常完成值是已解码分片所对应的整个原始文件的不透明版本。消费方仅在成功到达 EOF 后捕获该返回值，即使只展示一个行窗口也是如此。取消、解码失败或提前返回均不授予观察记录。`readBytesSnapshot` 可选地返回有界的完整字节及其版本；超限时拒绝操作，而不是截断。不支持这些能力的提供方返回 `undefined`，消费方保留其基于元数据的读取行为。
+
+```ts type-equiv
+/** A complete bounded raw read and the immutable revision of the bytes returned. */
+interface FsBytesSnapshot {
+  /** Complete original bytes; no decoding or normalization has taken place. */
+  bytes: Uint8Array
+  /** Opaque revision bound to these bytes and the backend's file identity. */
+  version: FsVersion
+}
+```
+
+快照版本描述实际消费的字节，而不是稍后未经验证的路径 stat。提供方不承诺对任意外部写入方提供事务性读取。本地防护语义及仍存在的发布竞态见 [fs-local](../../packages/fs/fs-local/README.zh.md#known-limitations-and-deferred-work)。
 
 ## 写入与编辑守卫（提供方约定）
 
@@ -383,6 +399,26 @@ abstract readText(target: FsTarget, signal?: AbortSignal): Promise<string>
  * @returns the chunk iterable, decoded and validated like {@link readText}.
  */
 abstract streamText(target: FsTarget, signal?: AbortSignal): Promise<AsyncIterable<string>>
+
+/**
+ * Optional content-bound read. The generator's normal completion value is the
+ * opaque revision of the whole raw file underlying the decoded chunks. Capture
+ * that return value only after EOF; cancellation or early return grants no
+ * observation. This does not promise a transactional read against external writers.
+ * @param _target - the resolved regular file to read.
+ * @param _signal - aborts reading, including between chunks.
+ * @returns the versioned stream, or undefined when the backend uses legacy metadata observations.
+ */
+streamTextSnapshot(_target: FsTarget, _signal?: AbortSignal): AsyncGenerator<string, FsVersion, void> | undefined
+
+/**
+ * Optional bounded raw read with an immutable revision of the returned bytes.
+ * @param _target - the resolved regular file to read.
+ * @param _signal - aborts the read.
+ * @param _maxBytes - inclusive cap on the complete raw content.
+ * @returns the complete snapshot, or undefined when the backend uses legacy metadata observations.
+ */
+readBytesSnapshot(_target: FsTarget, _signal: AbortSignal | undefined, _maxBytes: number): Promise<FsBytesSnapshot> | undefined
 
 /**
  * Read the whole regular file as raw bytes with no decoding or binary

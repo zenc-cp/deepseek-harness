@@ -11,6 +11,7 @@
 import { Context, Service } from '@deepseek-ai/cordis'
 import type { SandboxExecutionPolicy, SandboxMode } from '@deepseek-ai/dsh-sandbox'
 import type {
+  FsBytesSnapshot,
   FsDirEntry,
   FsEditOutcome,
   FsEditRequest,
@@ -29,6 +30,7 @@ export {
   FsVersion,
 } from './types.ts'
 export type {
+  FsBytesSnapshot,
   FsEditOutcome,
   FsEditRequest,
   FsDirEntry,
@@ -198,6 +200,30 @@ export abstract class FileSystem extends Service {
    * @returns the chunk iterable, decoded and validated like {@link readText}.
    */
   abstract streamText(target: FsTarget, signal?: AbortSignal): Promise<AsyncIterable<string>>
+
+  /**
+   * Optional content-bound read. The generator's normal completion value is the
+   * opaque revision of the whole raw file underlying the decoded chunks. Capture
+   * that return value only after EOF; cancellation or early return grants no
+   * observation. This does not promise a transactional read against external writers.
+   * @param _target - the resolved regular file to read.
+   * @param _signal - aborts reading, including between chunks.
+   * @returns the versioned stream, or undefined when the backend uses legacy metadata observations.
+   */
+  streamTextSnapshot(_target: FsTarget, _signal?: AbortSignal): AsyncGenerator<string, FsVersion, void> | undefined {
+    return undefined
+  }
+
+  /**
+   * Optional bounded raw read with an immutable revision of the returned bytes.
+   * @param _target - the resolved regular file to read.
+   * @param _signal - aborts the read.
+   * @param _maxBytes - inclusive cap on the complete raw content.
+   * @returns the complete snapshot, or undefined when the backend uses legacy metadata observations.
+   */
+  readBytesSnapshot(_target: FsTarget, _signal: AbortSignal | undefined, _maxBytes: number): Promise<FsBytesSnapshot> | undefined {
+    return undefined
+  }
 
   /**
    * Read the whole regular file as raw bytes with no decoding or binary
