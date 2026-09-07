@@ -1,0 +1,69 @@
+name: Fork PowerShell diagnostics
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+env:
+  DSH_TELEMETRY_DISABLED: '1'
+
+jobs:
+  focused:
+    if: github.repository == 'zenc-cp/deepseek-harness' && github.head_ref == 'fix/zenc-fork-ci' && github.event.pull_request.head.repo.full_name == github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: pnpm/action-setup@v4
+        with:
+          dest: ${{ runner.temp }}/setup-pnpm-diagnostics
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Verify PowerShell availability
+        shell: pwsh
+        run: |
+          $PSVersionTable.PSVersion.ToString()
+          node --version
+      - name: Install immutable dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Focused terminal readiness test
+        id: terminal
+        continue-on-error: true
+        run: pnpm exec vitest run --config vitest.pwsh-diagnostic.config.ts --reporter=default --reporter=json --outputFile=diagnostics/terminal.json
+      - name: Build snapshot prerequisites
+        id: build
+        continue-on-error: true
+        run: pnpm run build
+      - name: Replay PowerShell snapshots without updating fixtures
+        id: snapshots
+        if: steps.build.outcome == 'success'
+        continue-on-error: true
+        run: pnpm run test:snapshot --testNamePattern "replays (persistent-pwsh-tool-turn|pwsh-tool-turn) through" --reporter=default --reporter=json --outputFile=diagnostics/snapshots.json
+      - name: Retain focused reports
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pwsh-diagnostics-${{ matrix.os }}
+          path: diagnostics/*.json
+          retention-days: 3
+          if-no-files-found: warn
+      # Collection must not turn a failing diagnostic into a green check.
+      - name: Preserve failure status
+        if: always()
+        shell: pwsh
+        env:
+          TERMINAL_OUTCOME: ${{ steps.terminal.outcome }}
+          BUILD_OUTCOME: ${{ steps.build.outcome }}
+          SNAPSHOT_OUTCOME: ${{ steps.snapshots.outcome }}
+        run: |
+          if ($env:TERMINAL_OUTCOME -ne 'success' -or $env:BUILD_OUTCOME -ne 'success' -or $env:SNAPSHOT_OUTCOME -ne 'success') { exit 1 }
