@@ -194,6 +194,39 @@ describe('agents.resume graph-checkpoint seed', () => {
   })
 
   describe('in-flight remount skip', () => {
+    it('fails closed with a structured turn end when the restored route requires unfinished step effects', async () => {
+      const sessionId = SessionId('flight-unfinished-effects')
+      const adapter = new MockAdapter([textResponse('must not run')])
+      const ctx = await harness(adapter)
+      const seed = inFlightEnterStepSeed(sessionId)
+      seed.state.claimTarget = 'next-step'
+      const handle = await ctx.agents.resume({
+        resumeSessionId: sessionId,
+        agentOptions: { provider: 'mock', model: 'mock' },
+        turnStepCheckpoint: seed,
+      })
+      const turnEnds: unknown[] = []
+      ctx.on('session/event', (_session, event) => {
+        if (event.type === 'turn/end') turnEnds.push(event.data.reason)
+      })
+      try {
+        handle.agent.followup(createUserMessage({
+          content: [{ type: 'text', text: 'continue' }], source: { kind: 'user' },
+        }))
+        await waitForIdle(ctx, handle.agent)
+        expect(turnEnds).toEqual([{
+          kind: 'error',
+          error: {
+            code: 'CHECKPOINT_RESUME_UNSUPPORTED',
+            message: 'Cannot resume unfinished step effects from an apply-pre-step checkpoint',
+          },
+        }])
+      } finally {
+        await handle.dispose()
+        await ctx.fiber.dispose()
+      }
+    })
+
     it('remounts a running enter-step seed, skips preStep, and enters the turn at the seed turn number', async () => {
       const sessionId = SessionId('flight-enter-step')
       const ctx = await harness(new MockAdapter([textResponse('next')]))
@@ -362,10 +395,13 @@ describe('agents.resume graph-checkpoint seed', () => {
           resumeSessionId: sessionId,
           agentOptions: { provider: 'mock', model: 'mock' },
         })
-        const checkpoints: Array<{ type: string; data: unknown }> = []
+        const checkpoints: Array<{ type: string; data: unknown; ignorable?: true }> = []
+        const requiredEvents: SessionEvent[] = []
         ctx.on('session/event', (_session, event) => {
           if (event.type === 'session/checkpoint-node') {
-            checkpoints.push({ type: event.type, data: event.data })
+            checkpoints.push(event)
+          } else if (event.type !== 'session/trace-node') {
+            requiredEvents.push(event)
           }
         })
 
@@ -379,8 +415,13 @@ describe('agents.resume graph-checkpoint seed', () => {
         const nodes = checkpoints.map(c => (c.data as Record<string, unknown>).node)
         expect(nodes).toContain('apply-pre-step')
         expect(nodes).toContain('apply-step-outcome')
+        expect(requiredEvents.map(event => event.type)).toEqual(expect.arrayContaining([
+          'turn/start', 'turn/end', 'user/message', 'assistant/message',
+        ]))
+        for (const event of requiredEvents) expect(event).not.toHaveProperty('ignorable')
         // Each carries frozen State.
         for (const c of checkpoints) {
+          expect(c.ignorable).toBe(true)
           expect((c.data as Record<string, unknown>).schemaVersion).toBe(TURN_STEP_STATE_VERSION)
         }
         await handle.dispose()
@@ -394,10 +435,10 @@ describe('agents.resume graph-checkpoint seed', () => {
           resumeSessionId: sessionId,
           agentOptions: { provider: 'mock', model: 'mock' },
         })
-        const traces: Array<{ type: string; data: unknown }> = []
+        const traces: Array<{ type: string; data: unknown; ignorable?: true }> = []
         ctx.on('session/event', (_session, event) => {
           if (event.type === 'session/trace-node') {
-            traces.push({ type: event.type, data: event.data })
+            traces.push(event)
           }
         })
 
@@ -413,6 +454,7 @@ describe('agents.resume graph-checkpoint seed', () => {
         expect(nodes).toContain('apply-step-outcome')
         // Each carries timing and trace metadata.
         for (const t of traces) {
+          expect(t.ignorable).toBe(true)
           const d = t.data as Record<string, unknown>
           expect(d.node).toBeTruthy()
           expect(typeof d.startedAt).toBe('number')

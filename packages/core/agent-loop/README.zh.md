@@ -97,9 +97,10 @@ const handle = await ctx.agents.create({
 | [`src/index.ts`](src/index.ts) | 插件入口：`AgentLoop` 服务、配置 schema、声明式 agent 启动、工厂注册 |
 | [`src/agent.ts`](src/agent.ts) | 具体 `ReactLoopAgent` 驱动器：收件箱、轮次／步骤状态机、取消 |
 | [`src/tool-calls.ts`](src/tool-calls.ts) | 工具调度：独占屏障与有界并行池 |
-| [`src/runtime-context.ts`](src/runtime-context.ts) | 每步骤 runtime-context 快照处理 |
-| [`src/constants.ts`](src/constants.ts) | `DEFAULT_MAX_PARALLEL_TOOL_CALLS` |
-| [`src/invariant.ts`](src/invariant.ts) | 不变式配套：从会话日志重建请求 |
+| [`src/constants.ts`](src/constants.ts) | 公开的 `DEFAULT_MAX_PARALLEL_TOOL_CALLS` 常量 |
+| [`src/runtime-context.ts`](src/runtime-context.ts) | 工具执行与提示词渲染的作用域上下文投影 |
+| [`src/turn-step-state.ts`](src/turn-step-state.ts) | 版本化冻结 turn/step State、纯节点、路由、访问上限、图验证、checkpoint、trace 和失败边 |
+| [`tests/`](tests/) | 具体驱动器与工具调用运行时的内存测试 |
 
 ### 创建与拆除
 
@@ -128,6 +129,9 @@ const handle = await ctx.agents.create({
 - [工具子系统](../../../docs/subsystems/tools.zh.md)——循环分发所经过的流水线。
 - [显式取消 Agent Note](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.zh.md)——信号生命周期与取消竞态。
 - [core 分组地图](../README.zh.md)——core 各包如何组合。
+- [Subagent 生命周期](../../../docs/subsystems/subagent.zh.md)：自有会话、继续执行与收件箱路由。
+- [会话 checkpoint 策略](../../../packages/session/session-checkpoint-policy/README.zh.md)：事件日志的持久化。
+- [Turn/step State 源码](src/turn-step-state.ts)：turn/step 图的声明与验证；源码链接不是审计认证。
 
 -----
 
@@ -187,9 +191,10 @@ const handle = await ctx.agents.create({
 - **配置标签默认对应新会话**：省略 `sessionId` 时，每次启动都会创建新的 `${id}-session-<uuid>`；如需确切的恢复或创建行为，必须显式提供稳定的 `sessionId`，而 `resumeSessionId` 要求已有持久化历史。
 - **配置 agent 没有逐 agent persona 字段或 setup 钩子**：它们使用部署 persona；只有编程式 `ctx.agents.create()` / `resume()` 工厂选项支持带作用域的 persona 与工具组合。
 - **没有内置轮次预算**：工具调用或 steering 会让当前轮次继续；限制失控轮次的策略必须从既有生命周期扩展点（如 `agent/turn-stopping`）执行取消。
-- **节点 checkpoint 在每个声明的节点之后以 `session/checkpoint-node` 事件写入**（`publishNode`）。该事件为 ignorable，加载持久化后端时即为持久化。不在 remount 时自动回填。
-- **节点 trace 在每个声明的节点之后以 `session/trace-node` 事件写入**（`publishNode`）。该事件为 ignorable，与 checkpoint 一同持久化。
-- **`ResumeAgentOptions.turnStepCheckpoint`** 可在 remount 时填入 last-good State；它在 publish 前解析。idle（已完成轮次）的 checkpoint 不跳过 `preStep` / `step`。running（进行中）的 checkpoint 若 session id 匹配，则 `turn()` 直接调用 `resumeTurnStep()`：跳过 `preStep()` 主体，沿用 checkpoint 中的 turn 编号，不重放 `step()`。这不是 session 事件。
+- `publishNode` 将 `session/checkpoint-node` 和 `session/trace-node` 追加到会话日志。持久化和 flush 保证由配置的后端负责，追加不证明持久 flush 已完成。`Session.append()` 显式为这两个信息性事件类型设置 `ignorable: true`；其他事件类型默认仍为必需。这仅适用于新追加事件，不会补写已有持久化记录。
+- `agents.resume` 不从历史中自动选择最新节点 checkpoint。`ResumeAgentOptions.turnStepCheckpoint` 接受显式 checkpoint，在发布前解析。
+- 特殊恢复路径仅适用于 running 的 `apply-pre-step` checkpoint，要求 `requestHeaderLogged`、`enter` 或 `reject` 的 pre-step 决策及相同 session id。它跳过正常 pre-step 和 `step()` 主体，不是任意节点继续机制。若已领取消息的路由要求 `enter-step`，轮次以结构化错误 `CHECKPOINT_RESUME_UNSUPPORTED` 结束：该 seed 无法重建尚未完成的步骤副作用。这会拒绝不支持的继续执行，而非记录 null 或错误报告完成。
+- 声明节点边界不暴露有副作用 `step()` 内每个分支和重试。测试与文档门禁通过不证明完整崩溃恢复或副作用恰好执行一次。
 
 <a id="dev-note"></a>
 ### 开发备注
@@ -197,7 +202,7 @@ const handle = await ctx.agents.create({
 <details>
 <summary>维护者的工作上下文——点击展开</summary>
 
-`TurnStepState`（`src/turn-step-state.ts`）是单个 turn/step 的版本化冻结快照。它不是 `SESSION_FORMAT_VERSION`，也不是 session-checkpoint-policy。State v2 声明三个节点：`applyPreStepDecision`（纯）、`step`（有副作用边界）、`applyStepOutcome`（纯）。`step()` 主体是声明的边界节点，位于 `route-claimed` 与 `apply-step-outcome` 之间；`publishNode` 对其做 checkpoint 与 trace。`routeStep` 将其结果映射为 `step-completed` / `step-max-tokens` / `step-tool-calls` / `step-error`。`routePreStep`、`routeClaimed` 与 `routeStepOutcome` 声明主路径。任一节点之后，`turn()` 都可通过 `resumeTurnStep` 取得路由（加载 last-good checkpoint、重跑廉价路由、不重跑已完成的节点体）。这不是 `agents.resume`。`recordNodeVisit` 通过 `TURN_STEP_VISIT_CAPS` 分别将两个节点限制为 256；这些是图安全上限，不是产品轮次预算，且请求重试仍无上限。`validateTurnStepGraph` 在 `kick()` 跑第一轮之前遍历所有声明的节点、路由器、目标、上限、join、可达性与带上限的环，不执行节点。`TOOL_CALL_JOIN_POLICY` 将现有工具效果边契约声明为 `all`：有界 dispatch 可重叠，结果按模型顺序提交，任一结果可结束 turn；中止时排空已启动调用并为未启动调用生成结果，调度器失败时排空已启动调用后返回首个失败，`routeFailure` 将其映射为 `stop-turn`，再 `throwError` 以便 kick 收容。`checkpointAfterNode` 在每个节点之后冻结 last-good State；`ReactLoopAgent.lastNodeCheckpoint` 仅在内存中保存最新一个（`kick()` 开始时清空）。`publishNode` 同时追加一条 `session/checkpoint-node` 不可省略 session 事件，加载持久化后端后即为持久化。`traceAfterNode` 在该 checkpoint 之后立即记录内存中的 `TurnStepTraceEntry`（节点、turn、step、开始时间、时长、冻结 State）；`ReactLoopAgent.nodeTrace` 是当前 kick 已完成的声明节点路径，同样在 `kick()` 开始时清空。`publishNode` 同时追加一条 `session/trace-node` ignorable session 事件，加载持久化后端后即为持久化。请求重试与有副作用的 `step()` 主体不产生条目。`applyTurnStepFailure` 把 `{ message, code }` 写入 `failure`；`routeFailure` 将 null 映射为 `continue`，将事实映射为 `stop-turn`。访问上限仍抛错。`agent/request-error` 之后，`step()` 按 `routeRequestError` 切换（通过 `applyRequestError` 写入 `retry` / `throw`）。这不是 `routeFailure`。`routeClaimed` 声明 `enter-step`、`complete-turn` 与 `preserve-turn-end`；后者在 continuation 被改写为空时保留已有 turn 结果。`preStep` / `step` 不会被跳过。`ResumeAgentOptions.turnStepCheckpoint` 可在 remount 时填入 last-good State；它在 publish 前解析，不是 session 事件。idle/已完成轮次的 checkpoint 不跳过任何内容。running（进行中）且 session id 匹配的 checkpoint 则通过 `resumeTurnStep()` 进入 `turn()`：`preStep` 主体被跳过，轮次编号沿用 checkpoint 中的 turn，`step()` 不重放。
+`TurnStepState`（`src/turn-step-state.ts`）是单个 turn/step 的版本化冻结快照。它不是 `SESSION_FORMAT_VERSION`，也不是 session-checkpoint-policy。State v2 声明三个节点：`applyPreStepDecision`（纯）、`step`（有副作用边界）、`applyStepOutcome`（纯）。`step()` 主体是声明的边界节点，位于 `route-claimed` 与 `apply-step-outcome` 之间；`publishNode` 对其做 checkpoint 与 trace。`routeStep` 将其结果映射为 `step-completed` / `step-max-tokens` / `step-tool-calls` / `step-error`。`routePreStep`、`routeClaimed` 与 `routeStepOutcome` 声明主路径。任一节点之后，`turn()` 都可通过 `resumeTurnStep` 取得路由（加载 last-good checkpoint、重跑廉价路由、不重跑已完成的节点体）。这不是 `agents.resume`。`recordNodeVisit` 通过 `TURN_STEP_VISIT_CAPS` 分别将声明节点限制为 256；这些是图安全上限，不是产品轮次预算，且请求重试仍无上限。`validateTurnStepGraph` 在 `kick()` 跑第一轮之前遍历所有声明的节点、路由器、目标、上限、join、可达性与带上限的环，不执行节点。`TOOL_CALL_JOIN_POLICY` 将现有工具效果边契约声明为 `all`：有界 dispatch 可重叠，结果按模型顺序提交，任一结果可结束 turn；中止时排空已启动调用并为未启动调用生成结果，调度器失败时排空已启动调用后返回首个失败，`routeFailure` 将其映射为 `stop-turn`，再 `throwError` 以便 kick 收容。`checkpointAfterNode` 在每个节点之后冻结 last-good State；`ReactLoopAgent.lastNodeCheckpoint` 仅在内存中保存最新一个（`kick()` 开始时清空）。`publishNode` 同时追加 `session/checkpoint-node` 事件；持久化与兼容性限制见上文。`traceAfterNode` 在该 checkpoint 之后立即记录内存中的 `TurnStepTraceEntry`（节点、turn、step、开始时间、时长、冻结 State）；`ReactLoopAgent.nodeTrace` 是当前 kick 已完成的声明节点路径，同样在 `kick()` 开始时清空。`publishNode` 同时追加 `session/trace-node` 事件，受上述持久化和兼容性限制约束。`step()` 边界有记录，内部重试与子操作不各自生成声明节点条目。`applyTurnStepFailure` 把 `{ message, code }` 写入 `failure`；`routeFailure` 将 null 映射为 `continue`，将事实映射为 `stop-turn`。访问上限仍抛错。`agent/request-error` 之后，`step()` 按 `routeRequestError` 切换（通过 `applyRequestError` 写入 `retry` / `throw`）。这不是 `routeFailure`。`routeClaimed` 声明 `enter-step`、`complete-turn` 与 `preserve-turn-end`；后者在 continuation 被改写为空时保留已有 turn 结果。正常轮次运行 `preStep` / `step`；受限的显式 checkpoint 例外及不支持副作用恢复时的拒绝行为见上文已知限制。
 
 当前可变 `Phase`、Inbox 队列、`PreparedStep`、`requestHeaderLogged` 与 `requestSurfaceGeneration` 对应的字段见该模块。
 

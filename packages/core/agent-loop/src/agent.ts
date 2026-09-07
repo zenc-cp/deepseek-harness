@@ -395,6 +395,15 @@ export class ReactLoopAgent implements Agent {
               const claimedRoute = routeClaimed(resumed.state)
               switch (claimedRoute) {
                 case 'enter-step':
+                  // This seed does not reconstruct the PreparedStep/effect state.
+                  // Never record null or claim completion for unfinished effects.
+                  turnEnds = {
+                    kind: 'error',
+                    error: {
+                      code: 'CHECKPOINT_RESUME_UNSUPPORTED',
+                      message: 'Cannot resume unfinished step effects from an apply-pre-step checkpoint',
+                    },
+                  }
                   break
                 case 'complete-turn':
                   turnEnds = { kind: 'completed' }
