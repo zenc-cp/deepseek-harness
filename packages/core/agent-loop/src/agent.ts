@@ -18,7 +18,6 @@ import type {
 import { Inbox, agentEvents, assembleContextFor } from '@deepseek-ai/dsh-agent'
 import type { GenerateOptions, LlmCallConfig, Message, PreparedLlmCall } from '@deepseek-ai/dsh-llm'
 import {
-  BlockAssembler,
   LlmError,
   createAssistantMessage,
   errorChain,
@@ -34,6 +33,7 @@ import type { PromptAssembly } from '@deepseek-ai/dsh-system-prompt'
 import type {} from '@deepseek-ai/dsh-session-projection'
 import type { Context } from '@deepseek-ai/cordis'
 import { RuntimeContextProjection } from './runtime-context.ts'
+import { AssistantStreamAttempt } from './assistant-stream.ts'
 import { executeToolCalls } from './tool-calls.ts'
 import {
   TURN_STEP_STATE_VERSION,
@@ -112,6 +112,9 @@ export class ReactLoopAgent implements Agent {
   private restoredSeedPending = false
   /** In-memory completed declared-node path for this kick. */
   private heldNodeTrace: TurnStepTraceEntry[] = []
+  /** Process-local revision of assistant frames for this attached Session. */
+  private assistantStreamRevision = 0
+  private assistantAttemptCounter = 0
 
   constructor(
     private loopCtx: Context,
@@ -611,114 +614,155 @@ export class ReactLoopAgent implements Agent {
         signal,
       )
       startsRequestSeries = false
-      const assembler = new BlockAssembler()
-      const chunkSeqs: number[] = []
+      const live = new AssistantStreamAttempt(
+        this.session.id,
+        ++this.assistantAttemptCounter,
+        () => ++this.assistantStreamRevision,
+        turn,
+        step,
+        (frame) => { this.dispatch.emit('agent/assistant-stream', { frame }) },
+      )
+      let started = false
       try {
         const stream = preparedCall?.stream(request) ?? this.loopCtx.llm.stream(request)
         signal.throwIfAborted()
+        live.start()
+        started = true
         for await (const chunk of stream) {
           signal.throwIfAborted()
-          chunkSeqs.push(this.session.append('assistant/chunk', { turn, step, chunk }).seq)
-          assembler.push(chunk)
+          live.push(chunk)
         }
         signal.throwIfAborted()
       } catch (error: unknown) {
-        if (signal.aborted) {
-          const content = assembler.interruptedBlocks()
-          if (content.length > 0) {
-            this.session.append('assistant/message', {
-              turn,
-              step,
-              message: createAssistantMessage({
-                content,
-                source: { provider: request.provider, model: request.model },
-              }),
-              interrupted: true,
-              ...assembler.usage === undefined ? {} : { usage: assembler.usage },
-            }, { surfaceOp: 'append', sourceEventSeqs: chunkSeqs })
+        if (!started) throw error
+        try {
+          if (signal.aborted) {
+            const content = live.interruptedBlocks()
+            if (content.length > 0) {
+              live.settle('assistant/message', () => this.session.append('assistant/message', {
+                turn,
+                step,
+                message: createAssistantMessage({
+                  content,
+                  source: {
+                    provider: request.provider,
+                    model: request.model,
+                    ...live.replayState === undefined ? {} : { replayState: live.replayState },
+                  },
+                }),
+                interrupted: true,
+                ...live.usage === undefined ? {} : { usage: live.usage },
+                stream: live.stream,
+              }, { surfaceOp: 'append' }).seq)
+            } else {
+              live.settle(
+                'assistant/attempt',
+                () => this.session.append('assistant/attempt', { turn, step, stream: live.stream }).seq,
+              )
+            }
+          } else {
+            live.settle(
+              'assistant/attempt',
+              () => this.session.append('assistant/attempt', { turn, step, stream: live.stream }).seq,
+            )
           }
+        } catch (settlementError: unknown) {
+          throw new AggregateError(
+            [error, settlementError],
+            'Assistant stream failed and its durable settlement was rejected',
+            { cause: error },
+          )
         }
         throw error
       }
-      const finish = assembler.finish
-      if (finish.kind === 'error' || finish.kind === 'aborted') {
-        const action = await this.dispatch.waterfall(
-          'agent/request-error', {
+      try {
+        const finish = live.finish
+        if (finish.kind === 'error' || finish.kind === 'aborted') {
+          live.settle(
+            'assistant/attempt',
+            () => this.session.append('assistant/attempt', { turn, step, stream: live.stream }).seq,
+          )
+          const action = await this.dispatch.waterfall(
+            'agent/request-error', {
+              turn,
+              step,
+              provider: request.provider,
+              failure: finish.failure,
+              retryPolicy: preparedCall?.retryPolicy,
+              signal,
+            },
+            () => Promise.resolve<RequestErrorAction>(undefined),
+          )
+          signal.throwIfAborted()
+          const kind = action?.kind === 'retry' ? 'retry' : 'throw'
+          if (this.heldNodeCheckpoint) {
+            const recovered = applyRequestError(this.heldNodeCheckpoint.state, kind)
+            switch (routeRequestError(recovered)) {
+              case 'retry':
+                continue
+              case 'throw':
+                throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
+            }
+          }
+          /* v8 ignore start -- enter-step always checkpoints before step() */
+          if (action?.kind !== 'retry') {
+            throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
+          }
+          continue
+          /* v8 ignore stop */
+        }
+
+        const message = createAssistantMessage({
+          content: live.blocks(),
+          source: {
+            provider: request.provider,
+            model: request.model,
+            ...live.replayState !== undefined ? { replayState: live.replayState } : {},
+          },
+        })
+        live.settle(
+          'assistant/message',
+          () => this.session.append('assistant/message', {
             turn,
             step,
-            provider: request.provider,
-            failure: finish.failure,
-            retryPolicy: preparedCall?.retryPolicy,
-            signal,
-          },
-          () => Promise.resolve<RequestErrorAction>(undefined),
+            message,
+            ...live.usage === undefined ? {} : { usage: live.usage },
+            stream: live.stream,
+          }, { surfaceOp: 'append' }).seq,
         )
-        signal.throwIfAborted()
-        const kind = action?.kind === 'retry' ? 'retry' : 'throw'
-        if (this.heldNodeCheckpoint) {
-          const recovered = applyRequestError(this.heldNodeCheckpoint.state, kind)
-          switch (routeRequestError(recovered)) {
-            case 'retry':
-              continue
-            case 'throw':
-              throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
-          }
-        }
-        /* v8 ignore start -- enter-step always checkpoints before step() */
-        if (action?.kind !== 'retry') {
-          throw new LlmError(finish.failure.message, finish.failure.code, finish.failure)
-        }
-        continue
-        /* v8 ignore stop */
-      }
+        if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }
 
-      const message = createAssistantMessage({
-        content: assembler.blocks(),
-        source: {
-          provider: request.provider,
-          model: request.model,
-          ...assembler.replayState !== undefined ? { replayState: assembler.replayState } : {},
-        },
-      })
-      this.session.append(
-        'assistant/message',
-        {
-          turn,
-          step,
-          message,
-          ...assembler.usage === undefined ? {} : { usage: assembler.usage },
-        },
-        { surfaceOp: 'append', sourceEventSeqs: chunkSeqs },
-      )
-      if (finish.kind === 'max-tokens') return { kind: 'max-tokens' }
-
-      const toolCalls = message.content.filter(block => block.type === 'tool-call')
-      if (toolCalls.length === 0) return { kind: 'completed' }
-      const { concluded, failure } = await executeToolCalls(
-        this.loopCtx, turn, step, toolCalls, signal,
-        context => this.inbox.splice('next-step', this.inbox.nextStep.length, 0, [context]),
-      )
-      if (failure != null) {
-        const structured = failure instanceof LlmError
-          ? failure.failure
-          : { message: errorChain(failure), code: 'UNKNOWN' }
-        if (this.heldNodeCheckpoint) {
-          const failed = applyTurnStepFailure(this.heldNodeCheckpoint.state, {
-            message: structured.message,
-            code: structured.code,
-          })
-          switch (routeFailure(failed)) {
-            case 'stop-turn':
-              throw failure
-            case 'continue':
-              /* v8 ignore next -- scheduler failure writes non-null facts */
-              this.throwError(new Error(`agent "${this.id}": failure router continued after a scheduler failure`))
+        const toolCalls = message.content.filter(block => block.type === 'tool-call')
+        if (toolCalls.length === 0) return { kind: 'completed' }
+        const { concluded, failure } = await executeToolCalls(
+          this.loopCtx, turn, step, toolCalls, signal,
+          context => this.inbox.splice('next-step', this.inbox.nextStep.length, 0, [context]),
+        )
+        if (failure != null) {
+          const structured = failure instanceof LlmError
+            ? failure.failure
+            : { message: errorChain(failure), code: 'UNKNOWN' }
+          if (this.heldNodeCheckpoint) {
+            const failed = applyTurnStepFailure(this.heldNodeCheckpoint.state, {
+              message: structured.message,
+              code: structured.code,
+            })
+            switch (routeFailure(failed)) {
+              case 'stop-turn':
+                throw failure
+              case 'continue':
+                /* v8 ignore next -- scheduler failure writes non-null facts */
+                this.throwError(new Error(`agent "${this.id}": failure router continued after a scheduler failure`))
+            }
           }
+          /* v8 ignore next -- enter-step always checkpoints before step() */
+          throw failure
         }
-        /* v8 ignore next -- enter-step always checkpoints before step() */
-        throw failure
+        return concluded ? { kind: 'completed' } : null
+      } catch (error: unknown) {
+        if (!live.ended) live.abandon()
+        throw error
       }
-      return concluded ? { kind: 'completed' } : null
     }
   }
 

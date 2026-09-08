@@ -30,7 +30,7 @@ Choose it as the driver for standard compositions; swap it by implementing `Agen
 ## Use this package
 
 Mount `dsh-agent-loop` in any composition that should run agents.
-It supplies the driver behind `ctx.agents` and starts any agents you declare in its config; the standard demo composition is [`examples/agent-spine-demo`](../../../packages/examples/agent-spine-demo/README.md).
+It supplies the driver behind `ctx.agents` and starts any agents you declare in its config; both [`dsh-base`](../../bundle/base/README.md) and [`dsh-sdk-minimal`](../../bundle/sdk-minimal/README.md) mount it as an explicit row, and the standard demo composition is [`examples/agent-spine-demo`](../../../packages/examples/agent-spine-demo/README.md).
 
 ### Configure declarative agents
 
@@ -121,18 +121,29 @@ Unresolved routes still fail with `NO_ADAPTER`.
 
 ### Creation and teardown
 
-Creation is one rollback-protected transaction: construct the private session, concrete agent and scoped context; await optional setup; enter both registries; announce `session/created` and `agent/created`; emit `agent/session-start`; only then start the driver.
-Setup failure, commit failure or owner disposal rolls back without publishing either id.
-Teardown stops and drains, revokes scope, detaches the agent, then detaches the session.
-Each detach is bound to the exact registered object so an old disposer cannot remove a later replacement with the same id.
+Creation is one rollback-covered transaction: construct a private session, concrete agent, and scoped context; await optional setup; enter both registries; announce `session/created` then `agent/created`; emit `agent/session-start`; only then start the driver.
+A setup throw, commit failure, or owner disposal rolls the transaction back without publishing either id.
+Teardown runs stop-and-drain, closes the session's write path, unwinds the scope, detaches the agent, then detaches the session, and every detach is bound to the exact entered object so a stale disposer cannot remove a later same-id replacement.
+
+### Persistence integration
+
+The loop is the production acquisition point for session write handles.
+When `ctx.sessionPersistence` is mounted, `create`/`createAgent` call `persistence.create(header)` — storing the durable identity and taking write ownership before publication — and append the constructor seed through the handle; `resume` calls `persistence.open(id, 'write')` first (excluding a concurrent resume of the same id), reads the physically valid log through the handle, and appends `interruptedTurnClosers` for a log crashed mid-turn as an ordinary batch — semantic crash repair is the agent layer's job, not a storage entry point.
+Immediately before publication, `appendUnstoredSuffix` stores any events appended during the setup window (seed markers, delegation policy records), which never re-emit through `session/event`.
+Once published, the mounted backend routes the session's `session/event` batches, `session/flush` barriers, and `session/disposed` retirement into the active write handle by session id; the loop touches storage only through the handle it owns.
+The memoized teardown closes the handle — close drains any routed buffer — after the loop commits the session's closing events, provably releasing write ownership.
+Without a backend, sessions are memory-only and nothing else changes.
+Explicit checkpoint-seeded resume remains restricted: unfinished step effects fail closed rather than reconstructing a PreparedStep.
 
 ### Turn and step flow
 
-The driver owns an agent throughout its lifetime and runs inside `ctx.agents.withInitiator(agent, ...)`.
-At a turn boundary it opens the durable turn before atomically claiming pending next-step input and one queued prompt; between steps it claims only next-step input.
+The driver owns one agent for its lifetime and runs inside `ctx.agents.withInitiator(agent, ...)`.
+At a turn boundary it opens the durable turn, then atomically claims pending next-step input plus one queued prompt; between steps it claims only next-step input.
 `agent/pre-step` decides what enters the step.
-Each successful model call appends one `assistant/message` anchor referencing its chunk sequences; cancelled streams append an `interrupted: true` anchor with the delivered prefix so the next request includes what the user saw.
-Exclusive calls form barriers, parallel-safe calls use a bounded rolling pool, and policy, durable results and result context retain model order.
+An entered decision appends its complete `user/message` batch before the driver can claim again, while a rejected decision appends none.
+Each model attempt emits one process-local stream lifecycle and settles into a durable `assistant/message` or `assistant/attempt`; a cancelled stream appends an `interrupted: true` anchor with the delivered prefix so the next request contains what the user saw.
+Within a step, exclusive calls form barriers and parallel-safe calls use the bounded rolling pool; policy, durable results, and result context remain model-ordered.
+Declared turn/step graph nodes publish checkpoint and trace diagnostics for the restricted resume path.
 
 ### Failure and cancellation
 

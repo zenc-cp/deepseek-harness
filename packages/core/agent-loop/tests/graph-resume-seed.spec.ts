@@ -1,8 +1,9 @@
 import { describe, expect, it } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import LlmRuntime, { createUserMessage } from '@deepseek-ai/dsh-llm'
-import SessionStore, { SESSION_FORMAT_VERSION, SessionId, SessionPreparation } from '@deepseek-ai/dsh-session'
+import SessionStore, { SESSION_FORMAT_VERSION, SessionId, SessionLogOffset, SessionSeq } from '@deepseek-ai/dsh-session'
 import type { SessionEvent, SessionHeader } from '@deepseek-ai/dsh-session'
+import type { SessionHandle } from '@deepseek-ai/dsh-session-persistence'
 import SystemPrompt from '@deepseek-ai/dsh-system-prompt'
 import ToolRuntime from '@deepseek-ai/dsh-tools'
 import AgentRegistry, { type Agent } from '@deepseek-ai/dsh-agent'
@@ -31,21 +32,26 @@ async function harness(adapter: MockAdapter): Promise<Context> {
   await ctx.plugin(AgentLoop, { agents: [] })
   ctx.llm.registerAdapter(['mock'], adapter)
   const persistence = {
-    prepare(id: SessionId) {
-      const meta: SessionHeader = {
+    async open(id: SessionId): Promise<SessionHandle> {
+      const header: SessionHeader = {
         version: SESSION_FORMAT_VERSION,
         id,
         createdAt: 1,
+        isSeeded: false,
       }
-      const seed: SessionEvent[] = [
-        { type: 'turn/start', seq: 0, time: 1, data: { turn: 1 } },
-        { type: 'turn/end', seq: 1, time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
+      const events: SessionEvent[] = [
+        { type: 'turn/start', seq: SessionSeq(0), time: 1, data: { turn: 1 } },
+        { type: 'turn/end', seq: SessionSeq(1), time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
       ]
-      return Promise.resolve(SessionPreparation.create(ctx.sessions.prepare(id, {
-        seed,
-        meta,
-        seedSource: 'persistence',
-      })))
+      return {
+        header,
+        inheritedEventCount: SessionLogOffset(0),
+        read: async () => events,
+        append: async () => {},
+        flush: async () => {},
+        close: async () => {},
+        [Symbol.asyncDispose]: async () => {},
+      } as SessionHandle
     },
   }
   ctx.provide('sessionPersistence', persistence)
