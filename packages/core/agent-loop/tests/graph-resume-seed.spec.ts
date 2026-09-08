@@ -322,7 +322,7 @@ describe('agents.resume graph-checkpoint seed', () => {
         requestHeaderLogged: true,
         failure: null,
         visits: { 'apply-pre-step': 1, step: 0, 'apply-step-outcome': 0 },
-      }), { kind: 'reject', messages: [] })
+      }), { kind: 'reject' })
       const seed = JSON.parse(JSON.stringify(checkpointAfterNode(state, 'apply-pre-step')))
       // verify the router says block-turn
       expect(resumeTurnStep(seed).route).toBe('block-turn')
