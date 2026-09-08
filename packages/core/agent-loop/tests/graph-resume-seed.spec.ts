@@ -44,8 +44,10 @@ async function harness(adapter: MockAdapter): Promise<Context> {
         { type: 'turn/end', seq: SessionSeq(1), time: 2, data: { turn: 1, reason: { kind: 'completed' } } },
       ]
       return {
+        id,
         header,
         inheritedEventCount: SessionLogOffset(0),
+        access: 'write',
         read: async () => events,
         append: async () => {},
         flush: async () => {},

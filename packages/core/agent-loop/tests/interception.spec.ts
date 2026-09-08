@@ -84,7 +84,7 @@ describe('agent/pre-step', () => {
   it('holds the last pure-node checkpoint and clears it at the next kick', async () => {
     const adapter = new MockAdapter([textResponse('ok'), textResponse('ok2')])
     const ctx = await harness(adapter)
-    const agent = ctx.agentLoop.create(SessionId('node-checkpoint'), {
+    const agent = await ctx.agentLoop.create(SessionId('node-checkpoint'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -131,7 +131,7 @@ describe('agent/pre-step', () => {
       parameters: { text: { type: 'string', required: true } },
       execute: async ({ text }) => [{ type: 'text', text }],
     }))
-    const agent = ctx.agentLoop.create(SessionId('node-trace'), {
+    const agent = await ctx.agentLoop.create(SessionId('node-trace'), {
       provider: 'mock',
       model: 'mock',
     })
@@ -174,7 +174,7 @@ describe('agent/pre-step', () => {
   it('traces only apply-pre-step for empty-enter and reject turns', async () => {
     const adapter = new MockAdapter([textResponse('must not run'), textResponse('must not run')])
     const ctx = await harness(adapter)
-    const emptyAgent = ctx.agentLoop.create(SessionId('node-trace-empty'), {
+    const emptyAgent = await ctx.agentLoop.create(SessionId('node-trace-empty'), {
       provider: 'mock',
       model: 'mock',
     }) as ReactLoopAgent
@@ -187,7 +187,7 @@ describe('agent/pre-step', () => {
     expect(emptyAgent.nodeTrace.map(entry => entry.node)).toEqual(['apply-pre-step'])
     expect(emptyAgent.lastNodeCheckpoint?.node).toBe('apply-pre-step')
 
-    const rejectAgent = ctx.agentLoop.create(SessionId('node-trace-reject'), {
+    const rejectAgent = await ctx.agentLoop.create(SessionId('node-trace-reject'), {
       provider: 'mock',
       model: 'mock',
     }) as ReactLoopAgent
