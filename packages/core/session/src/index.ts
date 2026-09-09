@@ -723,6 +723,10 @@ export class Session {
       seq: SessionSeq(this.log.length),
       time: Date.now(),
       data: dataSnapshot,
+      // These graph diagnostics do not participate in history reconstruction.
+      // Keep every other event required by default; do not infer from payloads.
+      ...(type === 'session/checkpoint-node' || type === 'session/trace-node'
+        ? { ignorable: true as const } : {}),
       ...(surfaceMetadataSnapshot as { surfaceOp?: unknown; sourceEventSeqs?: unknown }),
     } as unknown as SessionEvent<T>)
     this.surfaceManager.validateNext(event as SessionEvent)

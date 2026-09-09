@@ -139,7 +139,21 @@ interface SessionEventMap {
    * writers — a concurrently live session holds its own boundary elsewhere,
    * so tolerating concurrent writers needs a signal beyond the log.
    */
-  'session/end-seed': { inherited?: true }
+'session/end-seed': { inherited?: true }
+  /**
+   * In-memory last-good TurnStepCheckpoint after a declared graph node.
+   * Appended by `publishNode` in the agent loop. Ignorable: an older runtime
+   * that does not know this type may safely skip it because the event carries
+   * no surface, tool, or turn-boundary semantics. The data is the frozen
+   * {@link TurnStepCheckpoint} JSON.
+   */
+  'session/checkpoint-node': { schemaVersion: number; node: string; state: JsonValue }
+  /**
+   * In-memory TurnStepTraceEntry after a declared graph node. Appended by
+   * `publishNode` alongside `session/checkpoint-node`. Ignorable. The data
+   * is the frozen {@link TurnStepTraceEntry} JSON.
+   */
+  'session/trace-node': { node: string; turn: number; step: number; startedAt: number; durationMs: number; state: JsonValue }
 }
 ```
 

@@ -7,7 +7,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -156,6 +156,32 @@ function readImage(ctx: Context, args: unknown, agent?: object) {
 function text(result: { content: { type: string; text?: string }[] }): string {
   return result.content.filter(b => b.type === 'text').map(b => b.text).join('')
 }
+
+describe('image snapshot freshness', () => {
+  it.each([false, true])('guards a later overwrite against raw-byte change=%s', async (changed) => {
+    const ctx = await setup()
+    const actor = agentOn('vision-model')
+    const path = join(dir, 'snapshot.png')
+    await writeFile(path, PNG_1X1)
+    await utimes(path, 1000, 1000)
+    const read = await readImage(ctx, { file_path: path }, actor)
+    expect(read.isError, text(read)).toBe(false)
+    const expected = Buffer.from(PNG_1X1)
+    if (changed) {
+      expected[expected.length - 1] = expected[expected.length - 1]! ^ 1
+      await writeFile(path, expected)
+    }
+    await utimes(path, 2000, 1000)
+    const write = await call(ctx, 'write', { file_path: path, content: 'replacement' }, actor)
+    expect(write.isError, text(write)).toBe(changed)
+    if (changed) {
+      expect(write.error).toMatchObject({ info: { code: 'FS_STALE_VERSION' } })
+      expect(await readFile(path)).toEqual(expected)
+    } else {
+      expect(await readFile(path, 'utf8')).toBe('replacement')
+    }
+  })
+})
 
 describe('imageMediaTypeForPath', () => {
   it('maps the four extensions case-insensitively and rejects everything else', () => {

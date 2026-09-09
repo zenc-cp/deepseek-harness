@@ -134,15 +134,16 @@ export function applyReadTool(ctx: Context, caps: ReadToolCaps): void {
     isConcurrencySafe: () => true,
     async execute(args, exec) {
       const input = parseReadArgs(args, caps.limit)
-      // One stat: absence observation OR type check + size routing + present version.
-      // A concurrent write can only make a later guarded mutation fail stale and require reread.
+      // One metadata stat for absence/type/legacy size routing. Content-aware
+      // providers return the revision of the bytes actually consumed instead.
       const { target, info } = await resolveRegularReadTarget(ctx, exec, input.filePath)
-
-      // Stream when the file is large OR size is unknown, so a size-less backend
-      // never buffers an arbitrarily large file.
-      const chunks = info.size === undefined || info.size >= caps.streamMinSize
-        ? await ctx.fs.streamText(target, exec.signal)
-        : [await ctx.fs.readText(target, exec.signal)]
+      let version = info.version
+      const snapshot = ctx.fs.streamTextSnapshot(target, exec.signal)
+      const chunks = snapshot !== undefined
+        ? (async function* () { version = yield* snapshot })()
+        : info.size === undefined || info.size >= caps.streamMinSize
+          ? await ctx.fs.streamText(target, exec.signal)
+          : [await ctx.fs.readText(target, exec.signal)]
       const window = await buildWindow(
         chunks,
         { offset: input.offset, limit: input.limit, maxLineLength: caps.maxLineLength, maxBytes: caps.maxBytes },
@@ -158,7 +159,7 @@ export function applyReadTool(ctx: Context, caps: ReadToolCaps): void {
       // Record the present observation (a no-op when no policy plugin listens). The
       // read already succeeded; an fs/observed listener is contractually a
       // synchronous, side-effect-only recorder.
-      ctx.emit('fs/observed', target, { kind: 'present', version: info.version }, exec)
+      ctx.emit('fs/observed', target, { kind: 'present', version }, exec)
       return outcome
     },
     // Result-time display: a `read` card carrying the structured line window a

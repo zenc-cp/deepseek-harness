@@ -9,7 +9,11 @@ English | [中文](README.zh.md)
 
 ## Summary
 
-`dsh-agent-loop` creates agents — fresh or resumed from persisted history — and runs the turn and step lifecycle that claims prompts, assembles requests, streams model responses, dispatches tool calls, and appends every result back to the session log. As the default driver it implements the `Agent` interface from `dsh-agent` and registers its factory there, so plugins create and drive agents through `ctx.agents` without depending on this package. Declarative config entries start agents automatically at boot, and `maxParallelToolCalls` caps how many parallel-safe tool calls run at once. It is the harness's only concrete loop — everything beyond "call the model, run the tools, repeat" belongs to plugins listening on the event taxonomy. Choose it as the driver for standard compositions; swap it by implementing `Agent` and registering through `ctx.agents`.
+`dsh-agent-loop` creates agents — fresh or resumed from persisted history — and runs the turn and step lifecycle that claims prompts, assembles requests, streams model responses, dispatches tool calls, and appends every result back to the session log.
+As the default driver it implements the `Agent` interface from `dsh-agent` and registers its factory there, so plugins create and drive agents through `ctx.agents` without depending on this package.
+Declarative config entries start agents automatically at boot, and `maxParallelToolCalls` caps how many parallel-safe tool calls run at once.
+It is the harness's only concrete loop — everything beyond "call the model, run the tools, repeat" belongs to plugins listening on the event taxonomy.
+Choose it as the driver for standard compositions; swap it by implementing `Agent` and registering through `ctx.agents`.
 
 ## Table of Contents
 
@@ -25,11 +29,13 @@ English | [中文](README.zh.md)
 <a id="use-this-package"></a>
 ## Use this package
 
-Mount `dsh-agent-loop` in any composition that should run agents. It supplies the driver behind `ctx.agents` and starts any agents you declare in its config; both [`dsh-base`](../../bundle/base/README.md) and [`dsh-sdk-minimal`](../../bundle/sdk-minimal/README.md) mount it as an explicit row.
+Mount `dsh-agent-loop` in any composition that should run agents.
+It supplies the driver behind `ctx.agents` and starts any agents you declare in its config; both [`dsh-base`](../../bundle/base/README.md) and [`dsh-sdk-minimal`](../../bundle/sdk-minimal/README.md) mount it as an explicit row, and the standard demo composition is [`examples/agent-spine-demo`](../../../packages/examples/agent-spine-demo/README.md).
 
 ### Configure declarative agents
 
-Agents declared in the config start automatically when the plugin loads. Each entry needs an `id` label; a model call additionally requires both `provider` and `model` (`agent/request` may supply a missing pair before dispatch).
+Agents declared in the config start automatically when the plugin loads.
+Each entry needs an `id` label; a model call additionally requires both `provider` and `model` (`agent/request` may supply a missing pair before dispatch).
 
 ```yaml
 - name: '@deepseek-ai/dsh-agent-loop'
@@ -54,11 +60,14 @@ Agents declared in the config start automatically when the plugin loads. Each en
 | `agents[].sessionId` | — | Exact identity: first use creates, a remount resumes materialized history |
 | `agents[].resumeSessionId` | — | Load this persisted session instead of creating one; mutually exclusive with `sessionId` |
 
-The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-agent-loop) is the exhaustive source for every accepted field. The adapter validates the effective reasoning effort and the loop records it in the request header. `maxParallelToolCalls` is also the whole `agent-loop` settings section, so a user layer over this entry caps the next tool group without a restart.
+The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-aidsh-agent-loop) is the exhaustive source for every accepted field.
+The adapter validates the effective reasoning effort and the loop records it in the request header.
+`maxParallelToolCalls` is also the whole `agent-loop` settings section, so a user layer over this entry caps the next tool group without a restart.
 
 ### Create or resume agents programmatically
 
-Plugins and hosts create agents through `ctx.agents.create()` and resume persisted sessions through `ctx.agents.resume()`; both return an `AgentHandle` whose `dispose()` owns exact teardown. The loop runs each created agent to completion — the handle is only needed when the caller must tear the agent down itself.
+Plugins and hosts create agents through `ctx.agents.create()` and resume persisted sessions through `ctx.agents.resume()`; both return an `AgentHandle` whose `dispose()` owns exact teardown.
+The loop runs every created agent to completion — callers only need the handle when they must tear an agent down themselves.
 
 ```text
 const handle = await ctx.agents.create({
@@ -70,7 +79,9 @@ const handle = await ctx.agents.create({
 
 ### What a step does
 
-Each step sends the agent's rendered system prompt, its visible tool schemas, and the session's derived history; the model's tool calls run through the guarded tool pipeline and every accepted fact is appended to the session log before the next step derives from it. Parallel-safe calls may overlap up to `maxParallelToolCalls`; exclusive calls run alone as ordering barriers. Cancellation is cooperative: `agent.cancel()` aborts the current activity and, unless `keepInbox` is set, clears pending work; a cancelled stream finalizes the text already delivered to the user.
+Every step sends the agent's rendered system prompt, its visible tool schemas, and the session's derived history; tool calls from the model pass through the guarded tool pipeline and every accepted fact is appended to the session log before the next step derives from it.
+Parallel-safe calls may overlap up to `maxParallelToolCalls`; exclusive calls run alone and form an ordering barrier.
+Cancellation is cooperative: `agent.cancel()` aborts the current activity and clears pending work unless `keepInbox` is set; cancelled streams finalize text already delivered.
 
 -----
 
@@ -78,44 +89,69 @@ Each step sends the agent's rendered system prompt, its visible tool schemas, an
 ## Understand the implementation
 
 <details>
-<summary>Implementation internals — click to expand</summary>
+<summary>Implementation details — click to expand</summary>
 
-This section explains how the package realizes the behavior above; the observable contract is covered in [Use this package](#use-this-package).
+This section explains how the package fulfills the behaviour above; observable contracts are fully described in [Use this package](#use-this-package).
 
-### Design concept
+### Design philosophy
 
-The package is the one concrete implementation of the public `Agent` contract. It registers itself as the `AgentFactory` on `ctx.agents`, so consumers never import this package; ownership of each created agent lives with the caller fiber and the loop provider, converging on one memoized quiescence boundary. Every observable effect happens through session events and the `agent/*` taxonomy — package internals are never part of the public surface.
+This package is the only concrete implementation of the public `Agent` contract.
+It registers itself as the `AgentFactory` on `ctx.agents`, so consumers never import this package; ownership of every created agent belongs to the caller fiber AND the loop provider, fused into one memoized full-quiescence boundary.
+Every observable effect happens through session events and the `agent/*` taxonomy — the package internals are never part of the public surface.
 
-### Request headers and adapter defaults
+### Request headers & adapter defaults
 
-After `agent/request`, `ctx.llm.prepareCall()` validates adapter-owned fields and resolves reasoning-effort and output-token defaults under the active turn signal. The loop retains that exact adapter through resolution, `request/header` logging, and dispatch. It writes a full header for the first request, a changed envelope, an explicit message-series start, a request after surface replacement, and resume; unchanged steps, retries, and ordinary later turns in the same series inherit the latest header. Before the next waterfall, the loop removes adapter-default fields so the current route resolves them again, while explicit settings persist. An unhandled route still fails with `NO_ADAPTER`.
+After `agent/request` returns, `ctx.llm.prepareCall()` validates adapter-held fields under the active turn signal and resolves reasoning-effort and output-token defaults.
+The loop keeps the same adapter across resolution, `request/header` recording, and dispatch.
+The loop writes a full header for first requests, a changed envelope, an explicit start-of-messages anchor, a surface replacement, and resume; unchanged-content steps, retries, and plain successor turns inherit the latest header.
+The loop strips adapter-default fields before the next waterfall, so the current route re-resolves them; explicit settings stay.
+Unresolved routes still fail with `NO_ADAPTER`.
 
 ### Source map
 
-| File | Role |
+| File | Purpose |
 |---|---|
 | [`src/index.ts`](src/index.ts) | Plugin entry: `AgentLoop` service, config schema, declarative agent startup, factory registration |
-| [`src/agent.ts`](src/agent.ts) | The concrete `ReactLoopAgent` driver: inbox, turn/step machine, cancellation |
-| [`src/tool-calls.ts`](src/tool-calls.ts) | Tool scheduling: exclusive barriers and the bounded parallel pool |
-| [`src/runtime-context.ts`](src/runtime-context.ts) | Per-step runtime-context snapshot handling |
-| [`src/constants.ts`](src/constants.ts) | `DEFAULT_MAX_PARALLEL_TOOL_CALLS` |
-| [`src/invariant.ts`](src/invariant.ts) | Invariant companion: request reconstruction from the session log |
+| [`src/agent.ts`](src/agent.ts) | Concrete `ReactLoopAgent` driver: inbox, turn/step state machine, cancellation |
+| [`src/tool-calls.ts`](src/tool-calls.ts) | Tool dispatch: exclusive barrier and bounded parallel pool |
+| [`src/constants.ts`](src/constants.ts) | Exposed `DEFAULT_MAX_PARALLEL_TOOL_CALLS` constant |
+| [`src/runtime-context.ts`](src/runtime-context.ts) | Projected scoped context for tool execution and prompt rendering |
+| [`src/turn-step-state.ts`](src/turn-step-state.ts) | Versioned frozen turn/step State, pure nodes, routers, visit caps, graph validation, checkpoints, trace, and failure edges |
+| [`tests/`](tests/) | In-memory tests for the concrete driver and tool-calls runtime |
 
 ### Creation and teardown
 
-Creation is one rollback-covered transaction: construct a private session, concrete agent, and scoped context; await optional setup; enter both registries; announce `session/created` then `agent/created`; emit `agent/session-start`; only then start the driver. A setup throw, commit failure, or owner disposal rolls the transaction back without publishing either id. Teardown runs stop-and-drain, closes the session's write path, unwinds the scope, detaches the agent, then detaches the session, and every detach is bound to the exact entered object so a stale disposer cannot remove a later same-id replacement.
+Creation is one rollback-covered transaction: construct a private session, concrete agent, and scoped context; await optional setup; enter both registries; announce `session/created` then `agent/created`; emit `agent/session-start`; only then start the driver.
+A setup throw, commit failure, or owner disposal rolls the transaction back without publishing either id.
+Teardown runs stop-and-drain, closes the session's write path, unwinds the scope, detaches the agent, then detaches the session, and every detach is bound to the exact entered object so a stale disposer cannot remove a later same-id replacement.
 
 ### Persistence integration
 
-The loop is the production acquisition point for session write handles. When `ctx.sessionPersistence` is mounted, `create`/`createAgent` call `persistence.create(header)` — storing the durable identity and taking write ownership before publication — and append the constructor seed through the handle; `resume` calls `persistence.open(id, 'write')` first (excluding a concurrent resume of the same id), reads the physically valid log through the handle, and appends `interruptedTurnClosers` for a log crashed mid-turn as an ordinary batch — semantic crash repair is the agent layer's job, not a storage entry point. Immediately before publication, `appendUnstoredSuffix` stores any events appended during the setup window (seed markers, delegation policy records), which never re-emit through `session/event`. Once published, the mounted backend routes the session's `session/event` batches, `session/flush` barriers, and `session/disposed` retirement into the active write handle by session id; the loop touches storage only through the handle it owns. The memoized teardown closes the handle — close drains any routed buffer — after the loop commits the session's closing events, provably releasing write ownership. Without a backend, sessions are memory-only and nothing else changes.
+The loop is the production acquisition point for session write handles.
+When `ctx.sessionPersistence` is mounted, `create`/`createAgent` call `persistence.create(header)` — storing the durable identity and taking write ownership before publication — and append the constructor seed through the handle; `resume` calls `persistence.open(id, 'write')` first (excluding a concurrent resume of the same id), reads the physically valid log through the handle, and appends `interruptedTurnClosers` for a log crashed mid-turn as an ordinary batch — semantic crash repair is the agent layer's job, not a storage entry point.
+Immediately before publication, `appendUnstoredSuffix` stores any events appended during the setup window (seed markers, delegation policy records), which never re-emit through `session/event`.
+Once published, the mounted backend routes the session's `session/event` batches, `session/flush` barriers, and `session/disposed` retirement into the active write handle by session id; the loop touches storage only through the handle it owns.
+The memoized teardown closes the handle — close drains any routed buffer — after the loop commits the session's closing events, provably releasing write ownership.
+Without a backend, sessions are memory-only and nothing else changes.
+Explicit checkpoint-seeded resume remains restricted: unfinished step effects fail closed rather than reconstructing a PreparedStep.
 
 ### Turn and step flow
 
-The driver owns one agent for its lifetime and runs inside `ctx.agents.withInitiator(agent, ...)`. At a turn boundary it opens the durable turn, then atomically claims pending next-step input plus one queued prompt; between steps it claims only next-step input. `agent/pre-step` decides what enters the step. An entered decision appends its complete `user/message` batch before the driver can claim again, while a rejected decision appends none. Each model attempt emits one process-local `start`, emits every `chunk` only after the matching durable `assistant/chunk`, and emits exactly one terminal `end`; final assembly or message-append failure settles it as `aborted`, while `committed` follows the durable `assistant/message`. Each successful model call appends one message anchor citing its chunk seqs, and a cancelled stream appends an `interrupted: true` anchor with the delivered prefix so the next request contains what the user saw. Within a step, exclusive calls form barriers and parallel-safe calls use the bounded rolling pool; policy, durable results, and result context remain model-ordered.
+The driver owns one agent for its lifetime and runs inside `ctx.agents.withInitiator(agent, ...)`.
+At a turn boundary it opens the durable turn, then atomically claims pending next-step input plus one queued prompt; between steps it claims only next-step input.
+`agent/pre-step` decides what enters the step.
+An entered decision appends its complete `user/message` batch before the driver can claim again, while a rejected decision appends none.
+Each model attempt emits one process-local stream lifecycle and settles into a durable `assistant/message` or `assistant/attempt`; a cancelled stream appends an `interrupted: true` anchor with the delivered prefix so the next request contains what the user saw.
+Within a step, exclusive calls form barriers and parallel-safe calls use the bounded rolling pool; policy, durable results, and result context remain model-ordered.
+Declared turn/step graph nodes publish checkpoint and trace diagnostics for the restricted resume path.
 
 ### Failure and cancellation
 
-Final adapter selection, dispatch, and iteration failures arrive as terminal finishes and enter `agent/request-error`; a handling listener returns `{ kind: 'retry' }` without calling `next()`, while an unhandled failure is terminal. Middleware, result-processing, tool, and other extension failures remain thrown and close the turn directly — plugin failure ends the turn, not the loop. Undispatched model tool calls after cancellation receive synthetic `tool/call` plus `ABORTED_BEFORE_DISPATCH` result pairs. The [explicit-cancellation decision](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.md) owns the signal lifecycle.
+Final adapter selection, dispatch and iteration failures reach `agent/request-error` as terminal finishes.
+A listener owning recovery returns `{ kind: 'retry' }` without calling `next()`; unhandled failures are terminal.
+Middleware, result processing, tools and other extension failures still throw and close the turn, not the loop.
+Undispatched model tool calls receive synthetic `tool/call` and `ABORTED_BEFORE_DISPATCH` result pairs after cancellation.
+The [explicit cancellation decision](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.md) owns signal lifecycle.
 
 </details>
 
@@ -124,73 +160,103 @@ Final adapter selection, dispatch, and iteration failures arrive as terminal fin
 <a id="further-exploration"></a>
 ## Further Exploration
 
-The package-level contract is enough for most consumers; read these when you need the surrounding domain and the design rationale.
-
-- [agent package](../agent/README.md) — the `Agent` handle, registry, and `agent/*` events this loop implements.
-- [Core subsystem](../../../docs/subsystems/core.md) — the turn flow and interception decisions.
-- [Session subsystem](../../../docs/subsystems/session.md) — the durable log the loop writes and derives from.
-- [Tools subsystem](../../../docs/subsystems/tools.md) — the pipeline the loop dispatches through.
-- [Explicit-cancellation Agent Note](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.md) — signal lifetime and cancellation races.
-- [Core group map](../README.md) — how the core packages compose.
+- [Agent package](../agent/README.md): the `Agent` handle, registry and `agent/*` events implemented by this loop.
+- [Core subsystem](../../../docs/subsystems/core.md): turn flow and interception decisions.
+- [Session subsystem](../../../docs/subsystems/session.md): the durable log written and projected by the loop.
+- [Tools subsystem](../../../docs/subsystems/tools.md): the dispatch pipeline.
+- [Explicit cancellation Agent Note](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.md): signal lifecycle and cancellation races.
+- [Core group map](../README.md): composition of core packages.
+- [Subagent lifecycle](../../../docs/subsystems/subagent.md): owned sessions, continuation, inbox routing.
+- [Session checkpoint policy](../../../packages/session/session-checkpoint-policy/README.md): durability of the event log.
+- [Turn/step state source](src/turn-step-state.ts): declarations and validation for the turn/step graph; this source link is not an audit certification.
 
 -----
 
 <a id="model-experience"></a>
 ## Model Experience
 
+<details>
+<summary>Guidance for models reading this package — click to expand</summary>
+
 ### Complete conversation request
 
 #### What the model sees
 
-For each step, the loop sends the rendered per-agent system prompt, the visible tool schemas, and the session's derived messages. It supplies `provider`, `model`, and `cwd` variable values but no additional fixed prose.
+Each step sends the rendered system prompt, visible tool schemas and derived session messages.
+The loop supplies `provider`, `model` and `cwd` variables but no fixed wording.
 
-#### Token effect
+#### Token impact
 
-System text and schemas are paid again on every step. Per-agent scoping chooses the contributions, while the authoritative assembly waterfall can alter the final request and makes its listener responsible for protocol coherence.
+System text and schemas count again each step.
+Per-agent scope determines contributions; the authoritative assembly waterfall can change the final request, with its listeners responsible for protocol coherence.
 
-#### KV Cache effect
+#### KV Cache impact
 
-Append-only only while system text, schemas, and earlier history remain byte-identical under the same provider and model route. A token-bearing assembly rewrite or composition change may invalidate reuse from the first altered request token.
+Requests remain append-only only on the same provider/model route with byte-identical system text, schemas and previous history.
+Token-bearing assembly rewrites or composition changes may invalidate reuse from the first changed token.
 
 ### Retained message history
 
 #### What the model sees
 
-Accepted user messages, assistant messages, tool calls and results, injected context, and steering are logged and sent on later steps. Raw stream chunks, lifecycle boundaries, and other log-only events are excluded.
+Accepted user and assistant messages, tool calls/results, injected context and steering are recorded and sent in later steps.
+Raw chunks, lifecycle boundaries and other log-only events are excluded.
 
-#### Token effect
+#### Token impact
 
-Input grows with every surface message until a compaction replacement shadows older nodes; a multi-step tool turn resends the accumulated history each step.
+Input grows with each surface message until compaction supersedes older nodes.
+Multi-step tool turns resend accumulated history each step.
 
-#### KV Cache effect
+#### KV Cache impact
 
-Ordinary history growth is append-only and preserves reusable entries. A surface replacement or compaction invalidates reuse from the first shadowed history token.
+Ordinary history growth appends and preserves reusable entries.
+Surface replacement or compaction invalidates reuse from the first superseded historical token.
 
 ### Undispatched calls after cancellation
 
 #### What the model sees
 
-If a later request replays an aborted step, each tool call that cancellation prevented from dispatching has error code `ABORTED_BEFORE_DISPATCH` and result text `Error: tool call aborted before dispatch`.
+If a later request replays an aborted step, every tool call prevented from dispatch has error code `ABORTED_BEFORE_DISPATCH` and result text `Error: tool call aborted before dispatch`.
 
-#### Token effect
+#### Token impact
 
-One fixed error result per skipped call remains in history until compaction shadows it.
+Each skipped call retains a fixed error result in history until compaction supersedes it.
 
-#### KV Cache effect
+#### KV Cache impact
 
-Append-only; each synthetic result follows the reusable request prefix and does not invalidate existing KV-cache entries.
+Append-only: each synthetic result follows the reusable request prefix and does not invalidate existing KV Cache entries.
 
-## Known Limitations and Deferred Work
+The `ReactLoopAgent` is the default concrete Agent driver.
+It does not own any prompt, tool definition, or system-prompt section — those are registered and composed by plugins through the scoped context created for each agent.
+Work that involves "making the agent loop do something different" should almost always be done through plugin hooks (`agent/pre-step`, `agent/turn-stopping`, `tools/pre-execute`, `tools/post-execute`, session events) rather than by modifying the loop itself.
+
+</details>
+
+-----
 
 <a id="known-limitations-and-deferred-work"></a>
+## Known Limitations and Deferred Work
 
+- **Classification is unary**: calls whose safety depends on comparing sibling calls or resources must remain exclusive ([rationale](../../../.agents/notes/implemented/feature/2026-07-10-parallel-tool-call-execution.md)).
+- **Configured labels create fresh sessions by default**: omitting `sessionId` creates `${id}-session-<uuid>` on each boot.
+Exact resume-or-create requires an explicit stable `sessionId`; `resumeSessionId` requires existing persisted history.
+- **Configured agents have no per-agent persona field or setup hook**: they use the deployment persona.
+Only programmatic `ctx.agents.create()` / `resume()` factory options support scoped persona and tool composition.
+- **No built-in turn budget**: tool calls or steering can continue the turn.
+Policies limiting runaway turns must cancel through existing lifecycle extension points such as `agent/turn-stopping`.
+- `publishNode` appends `session/checkpoint-node` and `session/trace-node` to the session log.
+Persistence and flush guarantees belong to the configured backend; appending is not proof of a completed durable flush.
+`Session.append()` explicitly marks these two informational event types with `ignorable: true`; other event types remain required by default. This applies to newly appended events and does not retrofit existing persisted records.
+- `agents.resume` does not automatically select the latest node checkpoint from history.
+`ResumeAgentOptions.turnStepCheckpoint` accepts an explicit checkpoint, parsed before publication.
+- The special resume path is restricted to a running `apply-pre-step` checkpoint with `requestHeaderLogged`, an `enter` or `reject` pre-step decision, and the same session id.
+It skips the normal pre-step and `step()` bodies.
+It is not a general arbitrary-node continuation mechanism.
+If the claimed-message router requires `enter-step`, the turn ends with structured error `CHECKPOINT_RESUME_UNSUPPORTED`: the seed does not reconstruct unfinished step effects. This refuses unsupported continuation rather than recording null or falsely reporting completion.
+- Declared node boundaries do not expose every branch or retry inside the effectful `step()` body.
+Passing tests and documentation gates do not establish complete crash recovery or exactly-once effects.
 
-These limits define when the loop needs special care. They are current package constraints, not a task backlog.
-
-- **Classification is unary** — calls whose safety depends on comparing siblings or resources must remain exclusive ([rationale](../../../.agents/notes/implemented/feature/2026-07-10-parallel-tool-call-execution.md)).
-- **Config labels are fresh by default** — omitting `sessionId` creates a fresh `${id}-session-<uuid>` on every startup; exact resume-or-create behavior requires an explicit stable `sessionId`, while `resumeSessionId` requires existing persisted history.
-- **Config agents have no per-agent persona field or setup hook** — they use the deployment persona; scoped persona and tool composition are available only through the programmatic `ctx.agents.create()` / `resume()` factory options.
-- **No built-in turn budget** — tool calls or steering continue the current turn; a policy that bounds runaway turns must cancel from an existing lifecycle extension point such as `agent/turn-stopping`.
+-----
 
 <a id="dev-note"></a>
 ### Dev Note
@@ -198,6 +264,29 @@ These limits define when the loop needs special care. They are current package c
 <details>
 <summary>Working context for maintainers — click to expand</summary>
 
-None.
+`TurnStepState` (`src/turn-step-state.ts`) is the versioned frozen snapshot for one turn/step.
+It is not `SESSION_FORMAT_VERSION` and not session-checkpoint-policy.
+State v2 declares three nodes: `applyPreStepDecision` (pure), `step` (effectful boundary), and `applyStepOutcome` (pure).
+The `step()` body (model streaming, session writes, retries, tools) is the declared boundary between `route-claimed` and `apply-step-outcome`; `publishNode` checkpoints and traces it.
+`routeStep` maps its outcome to `step-completed` / `step-max-tokens` / `step-tool-calls` / `step-error`.
+`routePreStep`, `routeClaimed`, and `routeStepOutcome` declare the main path.
+After a completed declared node, `turn()` can take the route from `resumeTurnStep` (load last-good checkpoint, re-run cheap routing, do not re-run the completed node body).
+That is not `agents.resume`.
+`recordNodeVisit` independently caps declared nodes at `TURN_STEP_VISIT_CAPS` (256); those are graph rails, not product turn budgets, and request retry stays uncapped.
+`validateTurnStepGraph` walks all declared nodes, routers, targets, caps, joins, reachability, and capped cycles before `kick()` runs a turn; it does not execute a node.
+`TOOL_CALL_JOIN_POLICY` declares the existing tool effect-edge contract as `all`: bounded dispatch may overlap, results commit in model order, any result may conclude the turn, abort drains started calls and synthesizes unstarted results, and scheduler failure drains started calls then returns the first failure; `routeFailure` maps that fact to `stop-turn` before `throwError`.
+`checkpointAfterNode` freezes last-good State after each node; `ReactLoopAgent.lastNodeCheckpoint` holds the latest one in memory (cleared at `kick()` start).
+`publishNode` also appends a `session/checkpoint-node` event; persistence and compatibility limitations are listed above.
+`traceAfterNode` records an in-memory `TurnStepTraceEntry` (node, turn, step, start, duration, frozen State) immediately after that checkpoint; `ReactLoopAgent.nodeTrace` is the completed declared-node path for the current kick and is also cleared at `kick()` start.
+`publishNode` also appends a `session/trace-node` event, subject to the persistence and compatibility limitations above.
+The `step()` boundary is recorded; internal retries and sub-operations do not each produce declared-node entries.
+`applyTurnStepFailure` writes `{ message, code }` onto `failure`; `routeFailure` maps null to `continue` and facts to `stop-turn`.
+Visit caps still throw.
+After `agent/request-error`, `step()` switches on `routeRequestError` (via `applyRequestError` writing `retry` / `throw`).
+That is not `routeFailure`.
+`routeClaimed` declares `enter-step`, `complete-turn`, and `preserve-turn-end`; the latter keeps an already-decided turn end when a continuation is rewritten to empty.
+Normal turns run `preStep` / `step`; the restricted explicit-checkpoint exception and its unsupported-effect rejection are described in Known Limitations above.
+
+Field mapping from the live `Phase`, inbox queues, `PreparedStep`, `requestHeaderLogged`, and `requestSurfaceGeneration` lives in that module.
 
 </details>

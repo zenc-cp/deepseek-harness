@@ -19,6 +19,27 @@ import { WorkspaceTypertGenerator } from '../src/workspace.ts'
 const fixtureRoot = resolve(import.meta.dirname, 'fixtures/type-model')
 const temporaryRoots: string[] = []
 
+function snapshotSymbol(symbol: string): string {
+  if (!symbol.startsWith('<external>:')) return symbol
+  const normalized = symbol.replaceAll('\\', '/')
+  const marker = '/node_modules/'
+  const index = normalized.lastIndexOf(marker)
+  return index < 0 ? symbol : `<external>:node_modules/${normalized.slice(index + marker.length)}`
+}
+
+it('normalizes only external installation prefixes for snapshots', () => {
+  expect(snapshotSymbol('<external>:../../store/node_modules/.pnpm/zod@4.4.3/node_modules/zod/v4/schemas.d.cts#ZodType'))
+    .toBe('<external>:node_modules/zod/v4/schemas.d.cts#ZodType')
+  expect(snapshotSymbol('<external>:C:\\store\\node_modules\\@scope\\pkg\\index.d.ts#Thing'))
+    .toBe('<external>:node_modules/@scope/pkg/index.d.ts#Thing')
+  expect(snapshotSymbol('@fixture/host:packages/host/src/index.ts#Thing'))
+    .toBe('@fixture/host:packages/host/src/index.ts#Thing')
+  expect(snapshotSymbol('<external>:../ambient/types.d.ts#Thing'))
+    .toBe('<external>:../ambient/types.d.ts#Thing')
+  expect(snapshotSymbol('<external>:../node_modules/other/index.d.ts#Other'))
+    .toBe('<external>:node_modules/other/index.d.ts#Other')
+})
+
 function normalizedPath(path: string): string {
   return path.replaceAll('\\', '/')
 }
@@ -192,7 +213,17 @@ describe('WorkspaceAnalyzer', { timeout: 60_000 }, () => {
       location: { file: 'packages/host/src/index.ts' },
       text: "'demo/ready'(agent: Agent<{ ready: true }>, payload: Box<Payload>): void",
     })
-    expect(model).toMatchSnapshot()
+    // Normalize installation layout only in the snapshot copy, never in analyzer IDs.
+    expect({
+      ...model,
+      faces: model.faces.map(face => ({
+        ...face,
+        packages: face.packages.map(pkg => ({
+          ...pkg,
+          exports: pkg.exports.map(entry => ({ ...entry, symbol: snapshotSymbol(entry.symbol) })),
+        })),
+      })),
+    }).toMatchSnapshot()
   })
 
   it('merges bounded package programs into the same face model', () => {

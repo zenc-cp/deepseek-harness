@@ -6,11 +6,13 @@
 
 import { Context } from '@deepseek-ai/cordis'
 import { constants as bufferConstants } from 'node:buffer'
+import { createHash } from 'node:crypto'
 import { isAbsolute, relative, resolve, sep } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import z from '@deepseek-ai/schemastery'
 import { FileSystem, FsError, FsVersion } from '@deepseek-ai/dsh-fs'
 import type {
+  FsBytesSnapshot,
   FsDirEntry,
   FsEditOutcome,
   FsEditRequest,
@@ -22,6 +24,8 @@ import type {
 } from '@deepseek-ai/dsh-fs'
 import {
   applyLiteralEdit,
+  decodeDiffBytes,
+  decodeEditBytes,
   listDirectory,
   normalizeLineEndings,
   probe,
@@ -35,7 +39,8 @@ import {
   streamWholeText,
   writeFileAtomic,
 } from './fsio.ts'
-import type { FsIoInternals } from './fsio.ts'
+import type { FsIoInternals, PathInfo } from './fsio.ts'
+import { captureSnapshot, contentVersion, isContentVersion, readBytesSnapshot, streamTextSnapshot } from './snapshot.ts'
 
 /** Configuration for the local filesystem backend. */
 export interface Config {
@@ -152,6 +157,14 @@ export class LocalFileSystem extends FileSystem {
     return Promise.resolve(streamWholeText({ displayPath: target.displayPath, targetKey: target.targetKey }, signal))
   }
 
+  override streamTextSnapshot(target: FsTarget, signal?: AbortSignal): AsyncGenerator<string, FsVersion, void> {
+    return streamTextSnapshot(target, signal, this.internals)
+  }
+
+  override readBytesSnapshot(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<FsBytesSnapshot> {
+    return readBytesSnapshot(target, signal, maxBytes, this.internals)
+  }
+
   override async readBytes(target: FsTarget, signal: AbortSignal | undefined, maxBytes: number): Promise<Uint8Array> {
     return readWholeBytes({ displayPath: target.displayPath, targetKey: target.targetKey }, signal, maxBytes, this.internals)
   }
@@ -182,7 +195,7 @@ export class LocalFileSystem extends FileSystem {
       if (expected?.kind === 'replaceIfVersion') {
         // Stale guard: the file must still exist at the version the owner observed.
         if (!existing) throw new FsError(`cannot write "${target.displayPath}": file no longer exists`, 'FS_STALE_VERSION')
-        if (existing.version !== expected.version) {
+        if (!isContentVersion(expected.version) && existing.version !== expected.version) {
           throw new FsError(`cannot write "${target.displayPath}": file changed since it was read`, 'FS_STALE_VERSION')
         }
       } else if (expected?.kind === 'createIfAbsent' && existing) {
@@ -198,9 +211,17 @@ export class LocalFileSystem extends FileSystem {
       // `before: null`; consumers retain their whole-file fallback.
       const diffable = existing !== null
         && Buffer.byteLength(content, 'utf8') < this.config.diffBasisMaxBytes
-      const before = diffable
-        ? await readTextForDiff(target.targetKey, this.config.diffBasisMaxBytes, signal)
-        : null
+      // A content guard hashes the current bytes once, retaining only the bounded
+      // optional diff basis. It never turns a metadata probe into a content read.
+      const guarded = expected?.kind === 'replaceIfVersion' && isContentVersion(expected.version)
+        ? await captureSnapshot(
+          target, { signal, expected: expected.version, internals: this.internals },
+          diffable ? this.config.diffBasisMaxBytes : 0,
+        )
+        : undefined
+      const before = guarded !== undefined
+        ? decodeDiffBytes(guarded.bytes)
+        : diffable ? await readTextForDiff(target.targetKey, this.config.diffBasisMaxBytes, signal) : null
       await writeFileAtomic(
         target.targetKey,
         content,
@@ -208,11 +229,14 @@ export class LocalFileSystem extends FileSystem {
         signal,
         this.internals,
         expected?.kind === 'createIfAbsent' ? { displayPath: target.displayPath } : undefined,
+        guarded === undefined ? undefined : async () => {
+          await captureSnapshot(target, { signal, expected: guarded.version, internals: this.internals }, 0)
+        },
       )
       const after = await probe(target.targetKey)
       return {
         operation: existing ? 'update' : 'create',
-        version: this.versionAfterWrite(after, target),
+        version: this.versionAfterWrite(after, target, content),
         before,
         // LF-normalized to share the diff basis with `before` (also LF): a CRLF
         // overwrite must not read as every line changed. Line-ending restoration
@@ -238,18 +262,34 @@ export class LocalFileSystem extends FileSystem {
       // expected === undefined: unconditional edit of the current content — no
       // version guard. Still inside the per-target lock, so the read→match→write
       // window is serialized and atomic.
-      if (expected && existing.version !== expected.version) {
+      if (expected && !isContentVersion(expected.version) && existing.version !== expected.version) {
         throw new FsError(`cannot edit "${target.displayPath}": file changed since it was read`, 'FS_STALE_VERSION')
       }
 
-      const original = await readForEdit(target.targetKey, target.displayPath, signal)
+      // Decode/match exactly the bytes whose digest passed, never a second read
+      // that could contain a writer's newer data.
+      const guarded = expected && isContentVersion(expected.version)
+        ? await captureSnapshot(target, {
+          signal,
+          expected: expected.version,
+          internals: this.internals,
+          maxBytes: bufferConstants.MAX_STRING_LENGTH,
+        }, bufferConstants.MAX_STRING_LENGTH + 1)
+        : undefined
+      if (guarded !== undefined && guarded.bytes === null) throw new FsError('edit exceeds the text size limit', 'FS_TOO_LARGE')
+      const original = guarded?.bytes != null
+        ? decodeEditBytes(guarded.bytes, target.displayPath)
+        : await readForEdit(target.targetKey, target.displayPath, signal)
       const edited = applyLiteralEdit(original.content, edit.oldString, edit.newString, edit.replaceAll, target.displayPath)
       const content = restoreLineEndings(edited.content, original.lineEndings)
-      await writeFileAtomic(target.targetKey, content, existing.mode, signal, this.internals)
+      await writeFileAtomic(target.targetKey, content, existing.mode, signal, this.internals, undefined,
+        guarded === undefined ? undefined : async () => {
+          await captureSnapshot(target, { signal, expected: guarded.version, internals: this.internals }, 0)
+        })
 
       const after = await probe(target.targetKey)
       return {
-        version: this.versionAfterWrite(after, target),
+        version: this.versionAfterWrite(after, target, content),
         // The LF-normalized before/after text (the applied-hunk diff basis);
         // line-ending restoration is a storage detail the diff ignores.
         before: original.content,
@@ -260,9 +300,13 @@ export class LocalFileSystem extends FileSystem {
 
   /* v8 ignore next 5 -- the post-write probe finding the file absent requires a
    * concurrent unlink between rename and stat; fall back to a sentinel version. */
-  private versionAfterWrite(after: { version: FsVersion } | null, target: FsTarget): FsVersion {
-    if (after) return after.version
-    return FsVersion(`missing:${target.targetKey}`)
+  private versionAfterWrite(after: PathInfo | null, target: FsTarget, content: string): FsVersion {
+    if (after?.type === 'file' && after.size === Buffer.byteLength(content, 'utf8')) {
+      return contentVersion(after.stats, createHash('sha256').update(content, 'utf8').digest('hex'))
+    }
+    // An external writer may race the post-publication probe. Never authorize
+    // different bytes just because their metadata was the most recent stat.
+    return FsVersion(`unverified:${target.targetKey}`)
   }
 }
 

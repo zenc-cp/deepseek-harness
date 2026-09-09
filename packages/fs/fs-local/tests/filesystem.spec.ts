@@ -44,6 +44,15 @@ async function versionOf(target: FsTarget): Promise<FsVersion> {
   return info.version
 }
 
+/** The content revision of the exact bytes consumed, independent of read-time metadata churn. */
+async function snapshotVersionOf(target: FsTarget): Promise<FsVersion> {
+  const stream = fs.streamTextSnapshot(target)
+  while (true) {
+    const next = await stream.next()
+    if (next.done) return next.value
+  }
+}
+
 async function remountWithDiffLimit(diffBasisMaxBytes: number): Promise<void> {
   await fiber.dispose()
   fiber = await ctx.plugin(LocalFileSystem, { cwd: dir, diffBasisMaxBytes })
@@ -571,13 +580,13 @@ describe('writeText', () => {
     expect(lockCount(fs)).toBe(0)
   })
 
-  it('replaceIfVersion returns the post-write version (matches a fresh stat)', async () => {
+  it('replaceIfVersion returns the post-write version (matches a fresh snapshot)', async () => {
     await writeFile(join(dir, 'a.txt'), 'v1')
     const target = await fs.resolve('a.txt')
     const before = await versionOf(target)
     const outcome = await fs.writeText(target, 'a much longer replacement body', { kind: 'replaceIfVersion', version: before })
     expect(outcome.version).not.toBe(before)
-    expect(outcome.version).toBe(await versionOf(target))
+    expect(outcome.version).toBe(await snapshotVersionOf(target))
   })
 
   it('honors a pre-aborted signal without creating the file', async () => {
@@ -674,9 +683,10 @@ describe('editText', () => {
   it('rejects zero matches and ambiguous matches at the right version', async () => {
     await writeFile(join(dir, 'a.txt'), 'a a a')
     const target = await fs.resolve('a.txt')
-    const version = await versionOf(target)
+    const version = await snapshotVersionOf(target)
     await expect(fs.editText(target, { oldString: 'z', newString: 'X', replaceAll: false }, { version }))
       .rejects.toMatchObject({ code: 'FS_EDIT_NOT_FOUND' })
+    expect(await snapshotVersionOf(target), 'a rejected edit must preserve the content revision').toBe(version)
     await expect(fs.editText(target, { oldString: 'a', newString: 'X', replaceAll: false }, { version }))
       .rejects.toMatchObject({ code: 'FS_AMBIGUOUS_EDIT' })
   })

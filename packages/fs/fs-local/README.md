@@ -50,7 +50,9 @@ The generated [configuration catalog](../../../docs/config-catalog.md#deepseek-a
 
 ### What you can do
 
-Read any regular UTF-8 text file whole or as a stream, read raw bytes up to a cap you choose, and list one directory level in stable name order. Create or replace a file atomically, and apply a literal text edit atomically; both mutations serialize per file, so concurrent writers never interleave. The version guard is optional: omit it for unconditional create-or-overwrite, or supply it to fail when the file changed since you last observed it.
+Read regular UTF-8 files whole or as a stream, read bounded raw bytes, and list one directory level in stable name order. Create, replace, or edit text atomically. Mutations through the same backend instance serialize per target. Omit the version guard for unconditional mutation, or supply it to reject a changed observation.
+
+Content-bound read revisions combine identity, size, write time, basic permissions, and a full SHA-256 of the raw bytes. Read-induced access-time/ctime changes do not invalidate them. Legacy metadata tokens retain strict checks. Mutation outcomes bind the bytes written, not unseen bytes from a later writer. `stat`, `lstat`, and directory listing never hash content.
 
 Failures are typed `FsError`s with stable codes — `FS_NOT_FOUND`, `FS_NOT_TEXT` (binary content), `FS_STALE_VERSION` (changed since observation), `FS_EDIT_NOT_FOUND` or `FS_AMBIGUOUS_EDIT` (no unique literal match), and others — so callers branch on the code, never on message text. A missing target on a guarded edit reports `FS_STALE_VERSION` either way.
 
@@ -78,6 +80,7 @@ The backend builds on three ideas:
 |---|---|
 | [`src/index.ts`](src/index.ts) | Service wiring: `LocalFileSystem`, `Config`, per-target mutation lock |
 | [`src/fsio.ts`](src/fsio.ts) | Cordis-free raw I/O: probe, reads, atomic write, literal edit, line-ending handling |
+| [`src/snapshot.ts`](src/snapshot.ts) | Content-bound reads and digest validation |
 | [`src/win32.ts`](src/win32.ts) | Windows-specific DACL preservation for atomic replacement |
 
 ### Write path
@@ -86,7 +89,7 @@ Each write probes the target, enforces the optional guard (`createIfAbsent` or `
 
 ### Edit path
 
-Each edit probes, verifies the version guard before literal matching (so stale edits report `FS_STALE_VERSION`, never a misleading no-match), reads the file, applies the literal replacement with LF normalization, restores the file's dominant line-ending style, and republishes — all inside the per-target lock.
+Each edit reads and verifies the existing bytes before literal matching, so stale edits report `FS_STALE_VERSION` rather than a misleading no-match. Content-guarded edits decode those verified bytes without a second content read, apply the literal replacement with LF normalization, restore the dominant line ending, and use the atomic publication path. Both mutation paths recheck content guards after staging, immediately before publication, inside the per-target lock.
 
 ### Ownership and invariants
 
@@ -106,6 +109,7 @@ Read these pages when the package-level contract is not enough. They move from t
 - [fs-sandbox](../fs-sandbox/README.md) — the sandbox-enforcing backend that extends this one.
 - [tool-fs](../tool-fs/README.md) — the model-facing tools that consume `ctx.fs`.
 - [fs-observation-policy](../fs-observation-policy/README.md) — the policy plugin that guards mutations through the `fs/*` events.
+- [Content-bound revisions](../../../.agents/notes/implemented/bug-fix/2026-09-05-content-bound-file-revisions.md): why read-induced metadata changes require a raw-byte revision.
 - [Windows DACL preservation note](../../../.agents/notes/implemented/bug-fix/2026-07-19-windows-atomic-write-dacl-preservation.md) — why atomic replacement copies the target's access policy.
 
 -----
@@ -127,11 +131,11 @@ No direct invalidation; the named consumer owns any request-prefix changes.
 These limits define when the local backend is a poor fit or needs special operational care. They are current package constraints, not a general filesystem comparison or a task backlog.
 
 - **`config.cwd` is not a sandbox** — it is a resolution default, not containment: absolute paths and `..` escape it. Enforce containment with a stricter `ctx.fs` backend or a permission plugin on the `tools/execute` waterfall ([capability-seam note](../../../.agents/notes/implemented/architecture/2026-06-17-filesystem-capability-seam.md)).
-- **Version tokens depend on filesystem metadata** — they combine device, inode, size, nanosecond mtime, and nanosecond ctime; a storage layer that cannot update any of those facts for a rewrite can still defeat the stale guard.
+- **Content guards require full scans**: observing a snapshot costs one whole-file scan; a content-guarded mutation costs two. The final scan retains no content. Legacy metadata tokens remain vulnerable to storage that preserves every version field across a rewrite.
 - **`editText` holds the whole file (plus the edited copy) in memory** — streaming exists only on the read path.
 - **A sub-limit overwrite still buffers a contextual basis** — `writeText` may retain up to just below `config.diffBasisMaxBytes` of prior text in addition to the caller-owned replacement; the bound does not cap the returned `after` value or the whole-file presentation fallback.
 - **Binary detection is asymmetric** — reads NUL-sample only the first 8192 bytes while edits scan the whole buffer, so a file with a late NUL reads fine but rejects edits.
-- **The per-target mutation lock is in-process only** — guarded creation still uses an atomic no-replace publication across processes, but replacement writers in another process are caught only when the optional version guard observes their metadata change; they are never serialized.
+- **The per-target lock is in-process only**: guarded creation uses atomic no-replace publication across processes. Replacement has no kernel compare-and-replace primitive: an external writer in the final validation-to-publication window can still be overwritten. External writers are never serialized by this lock.
 - **Guarded creation requires hard-link support** — filesystems or mounts that reject hard-link publication cannot serve `createIfAbsent`; the backend preserves the missing target and reports `FS_IO_ERROR`.
 - **Post-commit cleanup is best effort** — a successful publication remains successful if removal of its owner-only staging directory fails, leaving private residue for later operator cleanup.
 

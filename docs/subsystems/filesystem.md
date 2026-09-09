@@ -44,10 +44,9 @@ type FsTargetKey = Branded<'FsTargetKey'>
 ```ts type-equiv
 /**
  * Opaque file-version token — the freshness token a write/edit guards against.
- * The local backend derives it from high-resolution stat identity and freshness
- * fields; a remote backend might use a revision id. The policy layer records it
- * for stale checks; consumers may display related metadata but MUST NOT
- * interpret this token.
+ * The local backend supports legacy metadata tokens and content-bound snapshot
+ * and mutation tokens; a remote backend might use a revision id. The policy
+ * layer records the token unchanged. Consumers MUST NOT interpret or log it.
  */
 type FsVersion = Branded<'FsVersion'>
 ```
@@ -110,6 +109,23 @@ interface FsDirEntry {
   size?: number
 }
 ```
+
+<a id="content-bound-reads-provider-contract"></a>
+## Content-bound reads (provider contract)
+
+`streamTextSnapshot` optionally returns an async generator whose normal completion value is the opaque revision of the whole raw file underlying its decoded chunks. Consumers capture that return value only after successful EOF, even when displaying one line window. Cancellation, decoding failure, or early return grants no observation. `readBytesSnapshot` optionally returns bounded complete bytes with their revision; it rejects overflow rather than truncating. A provider that does not support these capabilities returns `undefined`, and consumers retain its metadata-based read behavior.
+
+```ts type-equiv
+/** A complete bounded raw read and the immutable revision of the bytes returned. */
+interface FsBytesSnapshot {
+  /** Complete original bytes; no decoding or normalization has taken place. */
+  bytes: Uint8Array
+  /** Opaque revision bound to these bytes and the backend's file identity. */
+  version: FsVersion
+}
+```
+
+A snapshot revision describes bytes actually consumed, not a later unverified path stat. Providers do not promise a transactional read against arbitrary external writers. Local guard semantics and the remaining publication race are documented by [fs-local](../../packages/fs/fs-local/README.md#known-limitations-and-deferred-work).
 
 ## Write and edit guards (provider contract)
 
@@ -383,6 +399,26 @@ abstract readText(target: FsTarget, signal?: AbortSignal): Promise<string>
  * @returns the chunk iterable, decoded and validated like {@link readText}.
  */
 abstract streamText(target: FsTarget, signal?: AbortSignal): Promise<AsyncIterable<string>>
+
+/**
+ * Optional content-bound read. The generator's normal completion value is the
+ * opaque revision of the whole raw file underlying the decoded chunks. Capture
+ * that return value only after EOF; cancellation or early return grants no
+ * observation. This does not promise a transactional read against external writers.
+ * @param _target - the resolved regular file to read.
+ * @param _signal - aborts reading, including between chunks.
+ * @returns the versioned stream, or undefined when the backend uses legacy metadata observations.
+ */
+streamTextSnapshot(_target: FsTarget, _signal?: AbortSignal): AsyncGenerator<string, FsVersion, void> | undefined
+
+/**
+ * Optional bounded raw read with an immutable revision of the returned bytes.
+ * @param _target - the resolved regular file to read.
+ * @param _signal - aborts the read.
+ * @param _maxBytes - inclusive cap on the complete raw content.
+ * @returns the complete snapshot, or undefined when the backend uses legacy metadata observations.
+ */
+readBytesSnapshot(_target: FsTarget, _signal: AbortSignal | undefined, _maxBytes: number): Promise<FsBytesSnapshot> | undefined
 
 /**
  * Read the whole regular file as raw bytes with no decoding or binary

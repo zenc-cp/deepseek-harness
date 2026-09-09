@@ -25,7 +25,8 @@ kind: "package-reference"
 <a id="use-this-package"></a>
 ## 使用本包
 
-在任何应运行 agent 的组合中挂载 `dsh-agent-loop`。它提供 `ctx.agents` 背后的驱动器，并启动你在配置中声明的 agent；[`dsh-base`](../../bundle/base/README.zh.md) 与 [`dsh-sdk-minimal`](../../bundle/sdk-minimal/README.zh.md) 都将它作为显式配置行挂载。
+在任何应运行 agent 的组合中挂载 `dsh-agent-loop`。
+它提供 `ctx.agents` 背后的驱动器，并启动你在配置中声明的 agent；[`dsh-base`](../../bundle/base/README.zh.md) 与 [`dsh-sdk-minimal`](../../bundle/sdk-minimal/README.zh.md) 都将它作为显式配置行挂载，标准演示组合见 [`examples/agent-spine-demo`](../../../packages/examples/agent-spine-demo/README.md)。
 
 ### 配置声明式 agent
 
@@ -97,21 +98,36 @@ const handle = await ctx.agents.create({
 | [`src/index.ts`](src/index.ts) | 插件入口：`AgentLoop` 服务、配置 schema、声明式 agent 启动、工厂注册 |
 | [`src/agent.ts`](src/agent.ts) | 具体 `ReactLoopAgent` 驱动器：收件箱、轮次／步骤状态机、取消 |
 | [`src/tool-calls.ts`](src/tool-calls.ts) | 工具调度：独占屏障与有界并行池 |
-| [`src/runtime-context.ts`](src/runtime-context.ts) | 每步骤 runtime-context 快照处理 |
-| [`src/constants.ts`](src/constants.ts) | `DEFAULT_MAX_PARALLEL_TOOL_CALLS` |
-| [`src/invariant.ts`](src/invariant.ts) | 不变式配套：从会话日志重建请求 |
+| [`src/constants.ts`](src/constants.ts) | 公开的 `DEFAULT_MAX_PARALLEL_TOOL_CALLS` 常量 |
+| [`src/runtime-context.ts`](src/runtime-context.ts) | 工具执行与提示词渲染的作用域上下文投影 |
+| [`src/turn-step-state.ts`](src/turn-step-state.ts) | 版本化冻结 turn/step State、纯节点、路由、访问上限、图验证、checkpoint、trace 和失败边 |
+| [`tests/`](tests/) | 具体驱动器与工具调用运行时的内存测试 |
 
 ### 创建与拆除
 
-创建是同一个受回滚保护的事务：构造私有会话、具象 agent 与带作用域上下文；等待可选 setup；进入两个注册表；依次宣告 `session/created` 与 `agent/created`；发出 `agent/session-start`；此后才启动驱动器。Setup 抛出、commit 失败或所有者 dispose 都会回滚事务而不发布任一 id。Teardown 顺序是停止并排空、关闭会话的写路径、撤销作用域、detach agent、再 detach 会话，且每次 detach 都绑定到确切进入的对象，因此陈旧 disposer 无法移除之后出现的同 id 替代项。
+创建是同一个受回滚保护的事务：构造私有会话、具象 agent 与带作用域上下文；等待可选 setup；进入两个注册表；依次宣告 `session/created` 与 `agent/created`；发出 `agent/session-start`；此后才启动驱动器。
+Setup 抛出、commit 失败或所有者 dispose 都会回滚事务而不发布任一 id。
+Teardown 顺序是停止并排空、关闭会话的写路径、撤销作用域、detach agent、再 detach 会话，且每次 detach 都绑定到确切进入的对象，因此陈旧 disposer 无法移除之后出现的同 id 替代项。
 
 ### 持久化集成
 
-循环是会话写句柄在生产环境中的获取点。挂载 `ctx.sessionPersistence` 后，`create`/`createAgent` 调用 `persistence.create(header)`——在发布之前存储持久身份并取得写所有权——并通过句柄追加构造 seed；`resume` 先调用 `persistence.open(id, 'write')`（排除同 id 的并发恢复），通过句柄读取物理上有效的日志，并为在轮次中途崩溃的日志把 `interruptedTurnClosers` 作为普通批次追加——语义崩溃修复是 agent 层的职责，而非存储入口。发布前的最后一刻，`appendUnstoredSuffix` 存储 setup 窗口期间追加的事件（seed 标记、委派策略记录），它们绝不会经由 `session/event` 重新发出。发布之后，挂载的后端按会话 id 把该会话的 `session/event` 批次、`session/flush` 屏障与 `session/disposed` 退役路由进活跃写句柄；循环只通过它拥有的句柄触碰存储。记忆化的 teardown 在循环提交会话的收尾事件之后关闭句柄——close 会排空任何已路由的缓冲——可证明地释放写所有权。没有后端时，会话只存在于内存中，其余一切不变。
+循环是会话写句柄在生产环境中的获取点。
+挂载 `ctx.sessionPersistence` 后，`create`/`createAgent` 调用 `persistence.create(header)`——在发布之前存储持久身份并取得写所有权——并通过句柄追加构造 seed；`resume` 先调用 `persistence.open(id, 'write')`（排除同 id 的并发恢复），通过句柄读取物理上有效的日志，并为在轮次中途崩溃的日志把 `interruptedTurnClosers` 作为普通批次追加——语义崩溃修复是 agent 层的职责，而非存储入口。
+发布前的最后一刻，`appendUnstoredSuffix` 存储 setup 窗口期间追加的事件（seed 标记、委派策略记录），它们绝不会经由 `session/event` 重新发出。
+发布之后，挂载的后端按会话 id 把该会话的 `session/event` 批次、`session/flush` 屏障与 `session/disposed` 退役路由进活跃写句柄；循环只通过它拥有的句柄触碰存储。
+记忆化的 teardown 在循环提交会话的收尾事件之后关闭句柄——close 会排空任何已路由的缓冲——可证明地释放写所有权。
+没有后端时，会话只存在于内存中，其余一切不变。
+显式 checkpoint 种子恢复仍然受限：未完成的 step 效果会失败关闭，而不会重建 PreparedStep。
 
 ### 轮次与步骤流程
 
-驱动器在其整个生命周期内拥有一个 agent，并在 `ctx.agents.withInitiator(agent, ...)` 内运行。在轮次边界，它先打开持久轮次，再原子领取待处理的 next-step 输入与一条排队提示词；在步骤之间则只领取 next-step 输入。`agent/pre-step` 决定什么进入该步骤。进入步骤的决定会在驱动器再次领取消息前追加完整的 `user/message` 批次，被拒绝的决定则不追加任何消息。每次模型尝试会发出一个进程本地 `start`，仅在匹配的持久 `assistant/chunk` 之后发出各个 `chunk`，并恰好发出一个终态 `end`；最终组装或消息追加失败时以 `aborted` 结算，`committed` 则出现在持久 `assistant/message` 之后。每次成功的模型调用都恰好追加一个引用其分片 seq 的 message 锚点，被取消的流则追加带 `interrupted: true` 的锚点并携带已交付前缀，使下一次请求包含用户看到的内容。在步骤内，独占调用形成屏障，并行安全调用使用有界滚动池；策略、持久结果与结果上下文保持模型顺序。
+驱动器在其整个生命周期内拥有一个 agent，并在 `ctx.agents.withInitiator(agent, ...)` 内运行。
+在轮次边界，它先打开持久轮次，再原子领取待处理的 next-step 输入与一条排队提示词；在步骤之间则只领取 next-step 输入。
+`agent/pre-step` 决定什么进入该步骤。
+进入步骤的决定会在驱动器再次领取消息前追加完整的 `user/message` 批次，被拒绝的决定则不追加任何消息。
+每次模型尝试都会发出一个进程本地的流生命周期，并结算为持久的 `assistant/message` 或 `assistant/attempt`；被取消的流会追加带 `interrupted: true` 的锚点并携带已交付前缀，使下一次请求包含用户看到的内容。
+在步骤内，独占调用形成屏障，并行安全调用使用有界滚动池；策略、持久结果与结果上下文保持模型顺序。
+声明的 turn/step 图节点会为受限恢复路径发布 checkpoint 与 trace 诊断事件。
 
 ### 失败与取消
 
@@ -132,6 +148,9 @@ const handle = await ctx.agents.create({
 - [工具子系统](../../../docs/subsystems/tools.zh.md)——循环分发所经过的流水线。
 - [显式取消 Agent Note](../../../.agents/notes/implemented/architecture/2026-07-16-explicit-turn-cancellation.zh.md)——信号生命周期与取消竞态。
 - [core 分组地图](../README.zh.md)——core 各包如何组合。
+- [Subagent 生命周期](../../../docs/subsystems/subagent.zh.md)：自有会话、继续执行与收件箱路由。
+- [会话 checkpoint 策略](../../../packages/session/session-checkpoint-policy/README.zh.md)：事件日志的持久化。
+- [Turn/step State 源码](src/turn-step-state.ts)：turn/step 图的声明与验证；源码链接不是审计认证。
 
 -----
 
@@ -191,6 +210,10 @@ const handle = await ctx.agents.create({
 - **配置标签默认对应新会话**：省略 `sessionId` 时，每次启动都会创建新的 `${id}-session-<uuid>`；如需确切的恢复或创建行为，必须显式提供稳定的 `sessionId`，而 `resumeSessionId` 要求已有持久化历史。
 - **配置 agent 没有逐 agent persona 字段或 setup 钩子**：它们使用部署 persona；只有编程式 `ctx.agents.create()` / `resume()` 工厂选项支持带作用域的 persona 与工具组合。
 - **没有内置轮次预算**：工具调用或 steering 会让当前轮次继续；限制失控轮次的策略必须从既有生命周期扩展点（如 `agent/turn-stopping`）执行取消。
+- `publishNode` 将 `session/checkpoint-node` 和 `session/trace-node` 追加到会话日志。持久化和 flush 保证由配置的后端负责，追加不证明持久 flush 已完成。`Session.append()` 显式为这两个信息性事件类型设置 `ignorable: true`；其他事件类型默认仍为必需。这仅适用于新追加事件，不会补写已有持久化记录。
+- `agents.resume` 不从历史中自动选择最新节点 checkpoint。`ResumeAgentOptions.turnStepCheckpoint` 接受显式 checkpoint，在发布前解析。
+- 特殊恢复路径仅适用于 running 的 `apply-pre-step` checkpoint，要求 `requestHeaderLogged`、`enter` 或 `reject` 的 pre-step 决策及相同 session id。它跳过正常 pre-step 和 `step()` 主体，不是任意节点继续机制。若已领取消息的路由要求 `enter-step`，轮次以结构化错误 `CHECKPOINT_RESUME_UNSUPPORTED` 结束：该 seed 无法重建尚未完成的步骤副作用。这会拒绝不支持的继续执行，而非记录 null 或错误报告完成。
+- 声明节点边界不暴露有副作用 `step()` 内每个分支和重试。测试与文档门禁通过不证明完整崩溃恢复或副作用恰好执行一次。
 
 <a id="dev-note"></a>
 ### 开发备注
@@ -198,6 +221,8 @@ const handle = await ctx.agents.create({
 <details>
 <summary>维护者的工作上下文——点击展开</summary>
 
-无。
+`TurnStepState`（`src/turn-step-state.ts`）是单个 turn/step 的版本化冻结快照。它不是 `SESSION_FORMAT_VERSION`，也不是 session-checkpoint-policy。State v2 声明三个节点：`applyPreStepDecision`（纯）、`step`（有副作用边界）、`applyStepOutcome`（纯）。`step()` 主体是声明的边界节点，位于 `route-claimed` 与 `apply-step-outcome` 之间；`publishNode` 对其做 checkpoint 与 trace。`routeStep` 将其结果映射为 `step-completed` / `step-max-tokens` / `step-tool-calls` / `step-error`。`routePreStep`、`routeClaimed` 与 `routeStepOutcome` 声明主路径。任一节点之后，`turn()` 都可通过 `resumeTurnStep` 取得路由（加载 last-good checkpoint、重跑廉价路由、不重跑已完成的节点体）。这不是 `agents.resume`。`recordNodeVisit` 通过 `TURN_STEP_VISIT_CAPS` 分别将声明节点限制为 256；这些是图安全上限，不是产品轮次预算，且请求重试仍无上限。`validateTurnStepGraph` 在 `kick()` 跑第一轮之前遍历所有声明的节点、路由器、目标、上限、join、可达性与带上限的环，不执行节点。`TOOL_CALL_JOIN_POLICY` 将现有工具效果边契约声明为 `all`：有界 dispatch 可重叠，结果按模型顺序提交，任一结果可结束 turn；中止时排空已启动调用并为未启动调用生成结果，调度器失败时排空已启动调用后返回首个失败，`routeFailure` 将其映射为 `stop-turn`，再 `throwError` 以便 kick 收容。`checkpointAfterNode` 在每个节点之后冻结 last-good State；`ReactLoopAgent.lastNodeCheckpoint` 仅在内存中保存最新一个（`kick()` 开始时清空）。`publishNode` 同时追加 `session/checkpoint-node` 事件；持久化与兼容性限制见上文。`traceAfterNode` 在该 checkpoint 之后立即记录内存中的 `TurnStepTraceEntry`（节点、turn、step、开始时间、时长、冻结 State）；`ReactLoopAgent.nodeTrace` 是当前 kick 已完成的声明节点路径，同样在 `kick()` 开始时清空。`publishNode` 同时追加 `session/trace-node` 事件，受上述持久化和兼容性限制约束。`step()` 边界有记录，内部重试与子操作不各自生成声明节点条目。`applyTurnStepFailure` 把 `{ message, code }` 写入 `failure`；`routeFailure` 将 null 映射为 `continue`，将事实映射为 `stop-turn`。访问上限仍抛错。`agent/request-error` 之后，`step()` 按 `routeRequestError` 切换（通过 `applyRequestError` 写入 `retry` / `throw`）。这不是 `routeFailure`。`routeClaimed` 声明 `enter-step`、`complete-turn` 与 `preserve-turn-end`；后者在 continuation 被改写为空时保留已有 turn 结果。正常轮次运行 `preStep` / `step`；受限的显式 checkpoint 例外及不支持副作用恢复时的拒绝行为见上文已知限制。
+
+当前可变 `Phase`、Inbox 队列、`PreparedStep`、`requestHeaderLogged` 与 `requestSurfaceGeneration` 对应的字段见该模块。
 
 </details>

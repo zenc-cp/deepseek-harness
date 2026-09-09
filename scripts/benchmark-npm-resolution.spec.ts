@@ -89,12 +89,14 @@ describe('npm resolution benchmark', () => {
     })
   })
 
-  it('runs npm against the local registry without requesting an archive', async () => {
+  // This asserts resolution semantics, not cold npm startup performance. The
+  // full Windows suite exceeded 10 seconds; retain a bounded child plus cleanup.
+  it('runs npm against the local registry without requesting an archive', { timeout: 45_000 }, async () => {
     const index: RegistryIndex = new Map([[
       '@deepseek-ai/dsh',
       new Map([['0.1.0', { name: '@deepseek-ai/dsh', version: '0.1.0' }]]),
     ]])
-    const result = await benchmarkNpmResolution(index, '0.1.0', 10_000)
+    const result = await benchmarkNpmResolution(index, '0.1.0', 30_000)
 
     expect(result.durationMs).toBeGreaterThan(0)
     expect(result.registryRequests).toBeGreaterThan(0)

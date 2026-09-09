@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -115,6 +115,40 @@ describe('default deployment (with dsh-fs-observation-policy)', () => {
   })
 
   describe('read', () => {
+    it('records a version that remains current after an unchanged read', async () => {
+      const observations: unknown[] = []
+      ctx.on('fs/observed', (_target, observation) => { observations.push(observation) })
+      for (let index = 0; index < 10; index++) {
+        const filePath = `unchanged-${index}.txt`
+        await writeFile(join(dir, filePath), 'original')
+        const result = await call('read', { file_path: filePath })
+        expect(result.isError, text(result)).toBe(false)
+        const observed = observations.at(-1)
+        const reread = await call('read', { file_path: filePath })
+        expect(reread.isError, text(reread)).toBe(false)
+        expect(observations.at(-1), filePath).toEqual(observed)
+      }
+    })
+
+    it('guards the unseen tail after a windowed read against an in-place restored-mtime write', async () => {
+      const path = join(dir, 'window.txt')
+      await writeFile(path, 'head\ntail')
+      await utimes(path, 1000, 1000)
+      const before = await stat(path, { bigint: true })
+      const read = await call('read', { file_path: path, offset: 1, limit: 1 })
+      expect(read.isError, text(read)).toBe(false)
+      expect(text(read)).not.toContain('2: tail')
+      await writeFile(path, 'head\nTAIL')
+      await utimes(path, 1000, 1000)
+      const after = await stat(path, { bigint: true })
+      expect(after.ino).toBe(before.ino)
+      expect(after.mtimeNs).toBe(before.mtimeNs)
+      expect(after.size).toBe(before.size)
+      const edit = await call('edit', { file_path: path, old_string: 'head', new_string: 'bad' })
+      expect(edit.error).toMatchObject({ info: { code: 'FS_STALE_VERSION' } })
+      expect(await readFile(path, 'utf8')).toBe('head\nTAIL')
+    })
+
     it('returns line-numbered content', async () => {
       await writeFile(join(dir, 'a.txt'), 'alpha\nbeta')
       const result = await call('read', { file_path: 'a.txt' })

@@ -1183,6 +1183,11 @@
     },
     {
       "doc": "docs/subsystems/filesystem.md",
+      "symbol": "FsBytesSnapshot",
+      "source": "packages/fs/fs/src/types.ts"
+    },
+    {
+      "doc": "docs/subsystems/filesystem.md",
       "symbol": "FsPathInfo",
       "source": "packages/fs/fs/src/types.ts"
     },

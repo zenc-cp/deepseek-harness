@@ -88,7 +88,8 @@ describe('verifyRuntimeClosure', () => {
     ])
   })
 
-  it('does not interpret an ordinary plugin array config as nested Loader entries', async () => {
+  // Filesystem integration exceeded the default 5 seconds in the full Windows run.
+  it('does not interpret an ordinary plugin array config as nested Loader entries', { timeout: 20_000 }, async () => {
     const root = fixture({
       'python/sdk-runtime/package.json': { name: 'runtime', dependencies: { '@scope/plugin': 'workspace:^' } },
       'python/sdk-runtime/platforms.json': platforms,
@@ -105,7 +106,7 @@ describe('verifyRuntimeClosure', () => {
     expect(result.failures).toEqual([])
   })
 
-  it('requires preset plugins to be linked from the workspace', async () => {
+  it('requires preset plugins to be linked from the workspace', { timeout: 20_000 }, async () => {
     const root = fixture({
       'python/sdk-runtime/package.json': { name: 'runtime', dependencies: { '@scope/plugin': '1.2.3' } },
       'python/sdk-runtime/platforms.json': platforms,

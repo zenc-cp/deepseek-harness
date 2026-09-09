@@ -109,6 +109,8 @@ Discovery resolves the root list for the lookup cwd, asks the watch manager to a
 
 ### Watching and invalidation
 
+Raw event bursts also schedule a metadata-only recovery scan of the watched root's direct skill candidates. Each root has at most one pending timer or active scan, plus one coalesced follow-up when events arrive during a scan. The delay uses the configured stability threshold (at least 10 ms); this is event-driven recovery, not periodic polling. Fingerprints exclude atime/ctime so reads do not trigger invalidation loops. Teardown cancels pending work and awaits active scans. This fallback does not detect content changes that preserve file identity, size, mtime, and mode, and scan cost scales with direct root entries.
+
 Existing roots are watched by Chokidar at depth 1; a root that does not exist is followed from its nearest existing ancestor one missing segment at a time using `fs.watchFile`. Relevant events — direct bundle add/remove, flat `.md` add/remove, and direct `SKILL.md` add/remove/change — coalesce into one provider invalidation per microtask batch, while resource-subtree changes are ignored. The watch manager is bounded by `watchMaxProjects`, logs and retries failed startup, and closes every handle at teardown. First-party `write`/`edit` mutations invalidate synchronously through the `fs/observed` event.
 
 </details>

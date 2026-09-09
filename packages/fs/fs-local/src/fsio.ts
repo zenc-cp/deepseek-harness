@@ -100,6 +100,10 @@ export interface FsIoInternals {
   inspectTemp?: (paths: { stagingDir: string; tempPath: string }) => void | Promise<void>
   /** Test hook after raw-read stat preflight and before bounded content I/O. */
   inspectReadBytesAfterStat?: (target: LocalTarget) => void | Promise<void>
+  /** Test hook after a snapshot handle is opened/statted, before its content read. */
+  inspectSnapshotAfterOpen?: (target: LocalTarget) => void | Promise<void>
+  /** Test hook after snapshot EOF, before final identity/metadata checks. */
+  inspectSnapshotAfterRead?: (target: LocalTarget) => void | Promise<void>
 }
 
 /** A resolved local path: the absolute path shown to callers and its realpath identity. */
@@ -112,6 +116,8 @@ export interface LocalTarget {
 
 /** Result of probing a path: null when it does not exist. */
 export interface PathInfo {
+  /** Raw metadata retained for binding a mutation's known bytes to its resulting identity. */
+  stats: BigIntStats
   version: FsVersion
   mode: number
   type: 'file' | 'directory' | 'other'
@@ -231,6 +237,7 @@ export async function probe(absolutePath: string): Promise<PathInfo | null> {
   const info = await probeStats(absolutePath, path => stat(path, { bigint: true }))
   if (!info) return null
   return {
+    stats: info,
     version: versionOf(info),
     mode: Number(info.mode & 0o777n),
     type: pathType(info),
@@ -336,7 +343,15 @@ function decodeUtf8(buffer: Uint8Array, verb: 'read' | 'edit', displayPath: stri
   }
 }
 
-function decodeUtf8Stream(
+/**
+ * Decode a raw chunk (or flush at EOF) with the backend's strict UTF-8 errors.
+ * @param decoder - the stateful decoder for this complete stream.
+ * @param chunk - bytes to decode, or undefined to flush.
+ * @param verb - the operation named in errors.
+ * @param displayPath - caller-facing path.
+ * @returns decoded text without line-ending normalization.
+ */
+export function decodeUtf8Stream(
   decoder: TextDecoder,
   chunk: Uint8Array | undefined,
   verb: 'read' | 'edit',
@@ -529,6 +544,7 @@ async function throwGuardedCreateFailure(
  * @param createIfAbsent - when provided, publish with a hard-link no-replace
  * primitive; a concurrent creator's file is preserved and this write is
  * rejected with `FS_NOT_OBSERVED` using the supplied display path.
+ * @param beforePublish - optional final guard after staging, immediately before publication.
  */
 export async function writeFileAtomic(
   absolutePath: string,
@@ -537,6 +553,7 @@ export async function writeFileAtomic(
   signal: AbortSignal | undefined,
   internals: FsIoInternals = {},
   createIfAbsent?: { displayPath: string },
+  beforePublish?: () => Promise<void>,
 ): Promise<void> {
   throwIfAborted(signal, 'write')
   const directory = dirname(absolutePath)
@@ -574,6 +591,8 @@ export async function writeFileAtomic(
     await handle.close()
     handle = undefined
 
+    throwIfAborted(signal, 'write')
+    if (beforePublish !== undefined) await beforePublish()
     throwIfAborted(signal, 'write')
     if (createIfAbsent !== undefined) {
       try {
@@ -675,9 +694,34 @@ export async function readForEdit(
   throwIfAborted(signal, 'edit')
   const buffer = await readFileAbortable(absolutePath, 'edit', signal)
   throwIfAborted(signal, 'edit')
+  return decodeEditBytes(buffer, displayPath)
+}
+
+/**
+ * Decode bytes already read and freshness-checked for a literal edit.
+ * @param buffer - complete raw bytes, not normalized or BOM-stripped by the caller.
+ * @param displayPath - caller-facing path for typed errors.
+ * @returns normalized text and its original line-ending style.
+ */
+export function decodeEditBytes(buffer: Uint8Array, displayPath: string): { content: string; lineEndings: LineEndings } {
   if (buffer.includes(0)) throw new FsError(`cannot edit "${displayPath}": binary file`, 'FS_NOT_TEXT')
   const raw = decodeUtf8(buffer, 'edit', displayPath)
   return { content: normalizeLineEndings(raw), lineEndings: detectLineEndings(raw) }
+}
+
+/**
+ * Decode an already bounded optional overwrite-diff basis.
+ * @param buffer - complete prior bytes, or null when not retained.
+ * @returns normalized text, or null for binary/invalid UTF-8 content.
+ */
+export function decodeDiffBytes(buffer: Uint8Array | null): string | null {
+  if (buffer === null || buffer.includes(0)) return null
+  try {
+    return normalizeLineEndings(new TextDecoder('utf-8', { fatal: true }).decode(buffer))
+  } catch (error: unknown) {
+    if (!(error instanceof TypeError)) throw error
+    return null
+  }
 }
 
 /**
@@ -724,16 +768,7 @@ export async function readTextForDiff(
     }
     throwIfAborted(signal, 'read')
     if (total !== openedSize) return null
-    const basis = buffer.subarray(0, total)
-    if (basis.includes(0)) return null
-    try {
-      return normalizeLineEndings(new TextDecoder('utf-8', { fatal: true }).decode(basis))
-    } catch (error: unknown) {
-      /* v8 ignore next 2 -- TextDecoder({fatal}) only throws TypeError on invalid bytes;
-       * any other throw is an unreachable runtime fault. */
-      if (!(error instanceof TypeError)) throw error
-      return null
-    }
+    return decodeDiffBytes(buffer.subarray(0, total))
   } catch (error: unknown) {
     // Cancellation is the caller's intent and still propagates.
     if (error instanceof FsError) throw error

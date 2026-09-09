@@ -33,6 +33,7 @@ import type { ProjectionDefinition } from '@deepseek-ai/dsh-session-projection'
 import { SessionPersistenceNotFoundError } from '@deepseek-ai/dsh-session-persistence'
 import type { SessionHandle, SessionPersistence } from '@deepseek-ai/dsh-session-persistence'
 import { ReactLoopAgent } from './agent.ts'
+import { parseTurnStepCheckpoint, type TurnStepCheckpoint } from './turn-step-state.ts'
 import { DEFAULT_MAX_PARALLEL_TOOL_CALLS } from './constants.ts'
 
 /** Fiber states that cannot own or serve a new lifecycle. */
@@ -487,7 +488,7 @@ export class AgentLoop extends Service implements AgentFactory {
     await this.waitForDrainingConfiguredIdentity(ownerCtx, sessionId)
     if (!this.ownership.isActive()) return
     try {
-      await this.resumeWith(ownerCtx, persistence, { resumeSessionId: sessionId, agentOptions })
+      await this.resumeWith(ownerCtx, persistence, { resumeSessionId: sessionId, agentOptions: agentOptions })
       return
     } catch (error: unknown) {
       if (!this.ownership.isActive()) return
@@ -534,6 +535,7 @@ export class AgentLoop extends Service implements AgentFactory {
     session: Session,
     callerSignal?: AbortSignal,
     handle?: SessionHandle,
+    restoredNodeCheckpoint?: TurnStepCheckpoint,
   ): PreparedAgent {
     assertAgentOptions(options)
     ownerCtx.fiber.assertActive()
@@ -642,7 +644,7 @@ export class AgentLoop extends Service implements AgentFactory {
       throw abort.signal.reason instanceof Error ? abort.signal.reason : new Error(String(abort.signal.reason))
     }
     try {
-      const agent = machine = new ReactLoopAgent(loopCtx, id, options, session)
+      const agent = machine = new ReactLoopAgent(loopCtx, id, options, session, restoredNodeCheckpoint)
       machineReady.resolve()
       assertLive()
 
@@ -691,7 +693,7 @@ export class AgentLoop extends Service implements AgentFactory {
     const stored = await this.createStoredSession(preparation.session)
     let prepared: PreparedAgent
     try {
-      prepared = this.prepare(this.ctx, id, options, preparation.session, undefined, stored?.handle)
+      prepared = this.prepare(this.ctx, id, options, preparation.session, undefined, stored?.handle, undefined)
     } catch (error: unknown) {
       await stored?.handle.close().catch(() => {})
       throw error
@@ -799,12 +801,15 @@ export class AgentLoop extends Service implements AgentFactory {
     signal: AbortSignal | undefined,
     source: SessionStartSource,
     stored?: StoredSession,
+    restoredNodeCheckpoint?: TurnStepCheckpoint,
   ): Promise<AgentHandle> {
     using ownedPreparation = preparation
     const session = ownedPreparation.session
     let prepared: PreparedAgent
     try {
-      prepared = this.prepare(ownerCtx, id, agentOptions, session, signal, stored?.handle)
+      prepared = this.prepare(
+        ownerCtx, id, agentOptions, session, signal, stored?.handle, restoredNodeCheckpoint,
+      )
     } catch (error: unknown) {
       await stored?.handle.close().catch(() => {})
       throw error
@@ -842,6 +847,9 @@ export class AgentLoop extends Service implements AgentFactory {
     persistence: SessionPersistence,
     options: ResumeAgentOptions,
   ): Promise<AgentHandle> {
+    const restoredNodeCheckpoint = options.turnStepCheckpoint === undefined
+      ? undefined
+      : parseTurnStepCheckpoint(options.turnStepCheckpoint)
     const id = options.resumeSessionId
     const published = (async () => {
       // The open and read may outlive their owner: race them against caller
@@ -901,6 +909,7 @@ export class AgentLoop extends Service implements AgentFactory {
           options.signal,
           'resume',
           owned,
+          restoredNodeCheckpoint,
         )
       } finally {
         preparation?.[Symbol.dispose]()
