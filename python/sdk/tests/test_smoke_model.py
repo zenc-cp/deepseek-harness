@@ -129,6 +129,88 @@ def test_snapshot_value_normalizes_embedded_assistant_stream_timing() -> None:
     ]
 
 
+@pytest.mark.parametrize("wrapper", [None, "payload", "params"])
+def test_snapshot_value_normalizes_only_trace_event_timing(wrapper: str | None) -> None:
+    from copy import deepcopy
+
+    normalize = SMOKE["normalize_snapshot_value"]
+    event = {
+        "type": "session/trace-node",
+        "ignorable": True,
+        "data": {
+            "node": "step", "turn": 1, "step": 2,
+            "startedAt": 100, "durationMs": 7,
+            "state": {
+                "schemaVersion": 2,
+                "route": {"provider": "deepseek-official", "model": "smoke-model"},
+                "visits": {"step": 2},
+                "stepOutcome": {"kind": "completed"},
+                "claimed": [{"role": "user", "content": "keep this payload"}],
+                "startedAt": 11, "durationMs": 12,
+            },
+        },
+    }
+    later = deepcopy(event)
+    later["data"].update(startedAt=900, durationMs=30)
+    expected = deepcopy(event)
+    expected["data"].update(startedAt=0, durationMs=0)
+
+    def wrap(value: object) -> object:
+        if wrapper is None:
+            return value
+        return {"method": "session.event", wrapper: {"sessionId": "s", "event": value}}
+
+    assert normalize(wrap(event), []) == wrap(expected)
+    assert normalize(wrap(event), []) == normalize(wrap(later), [])
+    assert event["data"]["startedAt"] == 100
+    assert event["data"]["durationMs"] == 7
+    for field, value in {
+        "node": "apply-step-outcome", "turn": 2, "step": 3,
+        "state": {**event["data"]["state"], "visits": {"step": 3}},
+    }.items():
+        changed = deepcopy(event)
+        changed["data"][field] = value
+        assert normalize(wrap(changed), []) != normalize(wrap(event), [])
+    for field, value in {
+        "route": {"provider": "other", "model": "smoke-model"},
+        "stepOutcome": {"kind": "aborted"},
+        "claimed": [{"role": "user", "content": "different payload"}],
+    }.items():
+        changed = deepcopy(event)
+        changed["data"]["state"][field] = value
+        assert normalize(wrap(changed), []) != normalize(wrap(event), [])
+
+
+def test_snapshot_value_retains_checkpoint_and_other_event_timing() -> None:
+    normalize = SMOKE["normalize_snapshot_value"]
+    for event_type in ("session/checkpoint-node", "tool/result", "custom/trace"):
+        event = {"type": event_type, "ignorable": True, "data": {
+            "node": "step", "startedAt": 100, "durationMs": 7,
+        }}
+        assert normalize(event, []) == event
+    incomplete = {"type": "session/trace-node", "data": {"node": "step"}}
+    assert normalize(incomplete, []) == incomplete
+
+
+def test_snapshot_comparison_retains_graph_events_and_order(tmp_path: Path) -> None:
+    import json
+
+    compare = SMOKE["compare_snapshot_files"]
+    events = [
+        {"type": "session/checkpoint-node", "ignorable": True,
+         "data": {"schemaVersion": 2, "node": "step", "state": {"visits": {"step": 2}}}},
+        {"type": "session/trace-node", "ignorable": True,
+         "data": {"node": "step", "startedAt": 0, "durationMs": 0}},
+    ]
+    content = json.dumps({"events": events})
+    (tmp_path / "result.json").write_text(content, encoding="utf-8")
+    compare({"result.json": content}, False, tmp_path, ("result.json",))
+    for changed in (events[1:], list(reversed(events)), [*events, events[0]]):
+        with pytest.raises(AssertionError, match="snapshot mismatch"):
+            compare({"result.json": json.dumps({"events": changed})},
+                    False, tmp_path, ("result.json",))
+
+
 def test_snapshot_comparison_expands_embedded_assistant_streams() -> None:
     normalize = SMOKE["normalize_session_format_comparison"]
     expected = [

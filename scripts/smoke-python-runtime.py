@@ -1887,6 +1887,12 @@ def normalize_snapshot_value(
         normalized["createdAt"] = 0
     if "seq" in normalized and "time" in normalized:
         normalized["time"] = 0
+    if normalized.get("type") == "session/trace-node":
+        data = normalized.get("data")
+        if isinstance(data, dict):
+            for key in ("startedAt", "durationMs"):
+                if isinstance(data.get(key), (int, float)):
+                    data[key] = 0
     if normalized.get("type") in ("assistant/message", "assistant/attempt"):
         data = normalized.get("data")
         stream = data.get("stream") if isinstance(data, dict) else None
