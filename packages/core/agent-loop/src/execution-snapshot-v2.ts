@@ -60,7 +60,7 @@ const snapshotSchema = zod.object({
   failedNodes: zod.array(identifier),
   latestOutcome: latestOutcomeSchema.nullable(),
   status: zod.enum(['ready', 'recoverable', 'terminal', 'halted']),
-  haltReason: zod.enum(['failed', 'interrupted']).nullable(),
+  haltReason: zod.enum(['failed', 'interrupted', 'control', 'cap-exhausted']).nullable(),
 }).strict()
 
 export type ExecutionExpectationV2 = zod.infer<typeof expectedSchema>
@@ -88,7 +88,7 @@ export type ExecutionSnapshotV2 = {
     }
     | null
   readonly status: 'ready' | 'recoverable' | 'terminal' | 'halted'
-  readonly haltReason: 'failed' | 'interrupted' | null
+  readonly haltReason: 'failed' | 'interrupted' | 'control' | 'cap-exhausted' | null
 }
 
 function requireInvariant(condition: boolean, message: string): asserts condition {
@@ -159,6 +159,10 @@ export function parseExecutionSnapshotV2(
     attempts += count
     requireInvariant(Number.isSafeInteger(attempts), 'unsafe total attempts')
   }
+  const preBodyHalt = cp.haltReason === 'control' || cp.haltReason === 'cap-exhausted'
+  if (preBodyHalt) {
+    requireInvariant(cp.pending === null, 'pre-body halt with pending invocation')
+  }
   const pendingCount = cp.pending ? 1 : 0
   const settled = attempts - pendingCount
   requireInvariant(settled >= 0, 'pending exceeds reserved attempts')
@@ -187,49 +191,60 @@ export function parseExecutionSnapshotV2(
   }
   requireInvariant(failedNodeSet.size === cp.expectedFailureSeq, 'failed-node count mismatch')
 
+  const fatal = cp.haltReason === 'failed'
   const completed = cp.lastGood.completed
   requireInvariant((cp.successSeq === 0) === (completed === null), 'completed marker mismatch')
   if (completed) {
-    requireInvariant(completed.attempt >= 1 && completed.attempt <= attempts, 'completed attempt out of range')
+    // All successes precede or include lastGood; neither a pending nor fatal attempt can be lastGood.
+    requireInvariant(
+      completed.attempt >= cp.successSeq && completed.attempt <= settled - (fatal ? 1 : 0),
+      'completed attempt out of range',
+    )
     requireInvariant((counts.get(completed.nodeId) ?? 0) > 0, 'completed node has no visits')
-    requireInvariant(!failedNodeSet.has(completed.nodeId) || (counts.get(completed.nodeId) ?? 0) >= 1, 'completed on failed node')
   }
+  for (const visit of cp.visits) {
+    // These are distinct events even when they name the same node. A successful latestOutcome
+    // aliases completed; a failed latestOutcome is already counted by failedNodes.
+    const minimum = (completed?.nodeId === visit.nodeId ? 1 : 0)
+      + (cp.pending?.nodeId === visit.nodeId ? 1 : 0)
+      + (failedNodeSet.has(visit.nodeId) ? 1 : 0)
+    requireInvariant(visit.count >= minimum, 'visits cannot support recorded node events')
+  }
+  // The runner clears domain outcomes on fatal settlement; otherwise the latest settlement is retained.
+  requireInvariant((cp.latestOutcome === null) === (settled === 0 || fatal), 'latest outcome presence mismatch')
 
   if (cp.pending) {
     requireInvariant(cp.pending.attempt === attempts, 'pending must be latest attempt')
     requireInvariant((counts.get(cp.pending.nodeId) ?? 0) > 0, 'pending node has no visits')
-    requireInvariant(!failedNodeSet.has(cp.pending.nodeId) || (counts.get(cp.pending.nodeId) ?? 0) >= 2, 'pending retries failed node')
+    requireInvariant(!failedNodeSet.has(cp.pending.nodeId), 'pending retries failed node')
   }
 
   if (cp.latestOutcome) {
     const invocationAttempt = cp.latestOutcome.invocation.attempt
-    // Pending may coexist with the previous settled outcome while the next attempt is reserved.
-    if (cp.pending) {
-      requireInvariant(invocationAttempt < cp.pending.attempt, 'pending outcome ordering')
-    } else {
-      requireInvariant(invocationAttempt >= 1 && invocationAttempt <= settled, 'outcome attempt out of range')
-    }
-    requireInvariant(invocationAttempt >= 1 && invocationAttempt <= attempts, 'outcome attempt bounds')
+    // A reservation does not supersede the previous settlement. Attempts are contiguous.
+    requireInvariant(invocationAttempt === settled, 'outcome must be the latest settled attempt')
     requireInvariant((counts.get(cp.latestOutcome.invocation.nodeId) ?? 0) > 0, 'outcome node has no visits')
     if (cp.latestOutcome.kind === 'success') {
       requireInvariant(completed !== null, 'success outcome without completed marker')
       requireInvariant(completed.attempt === invocationAttempt, 'success outcome/completed mismatch')
       requireInvariant(completed.nodeId === cp.latestOutcome.invocation.nodeId, 'success node mismatch')
-      requireInvariant(cp.status === 'ready' || cp.status === 'terminal', 'success status mismatch')
+      requireInvariant(!failedNodeSet.has(completed.nodeId), 'latest success retries a failed node')
+      requireInvariant(
+        cp.status === 'ready' || cp.status === 'terminal' || cp.haltReason === 'interrupted' || preBodyHalt,
+        'success status mismatch',
+      )
     } else {
       // Validate failure payload against declared codes via domain-result rules.
       parseDomainResult({ kind: 'failure', failure: cp.latestOutcome.failure }, cp.graph.failureCodes)
       requireInvariant(failedNodeSet.has(cp.latestOutcome.invocation.nodeId), 'failure missing failed node')
-      if (!cp.pending) {
-        requireInvariant(
-          cp.latestOutcome.invocation.attempt === settled || cp.haltReason === 'failed',
-          'failure outcome must be latest settled attempt',
-        )
-      }
+      requireInvariant(completed === null || completed.attempt < invocationAttempt, 'lastGood must precede failure')
       const target = recoveryTargetFor(cp.graph, cp.latestOutcome.failure.code)
       requireInvariant(target !== undefined, 'failure code missing recovery declaration')
       const retriesProducer = target === cp.latestOutcome.invocation.nodeId
       const targetAlreadyFailed = target !== null && failedNodeSet.has(target)
+      if (cp.pending) {
+        requireInvariant(cp.pending.nodeId === target, 'pending recovery target mismatch')
+      }
       if (cp.status === 'recoverable') {
         requireInvariant(target !== null, 'recoverable requires recovery target')
         requireInvariant(!retriesProducer, 'recovery retries failed producer')
@@ -246,13 +261,8 @@ export function parseExecutionSnapshotV2(
         // Recovery or later attempt reserved; previous failure outcome remains until settlement.
         requireInvariant(cp.haltReason === null, 'ready pending halt reason')
       } else {
-        requireInvariant(cp.status === 'halted' && cp.haltReason === 'failed', 'unexpected failure status')
+        requireInvariant(cp.status === 'halted', 'unexpected failure status')
       }
-    }
-  } else {
-    requireInvariant(cp.expectedFailureSeq === 0 || cp.haltReason === 'failed', 'missing failure outcome')
-    if (cp.status === 'recoverable') {
-      requireInvariant(false, 'recoverable requires failure outcome')
     }
   }
 
@@ -266,17 +276,19 @@ export function parseExecutionSnapshotV2(
   if (cp.status === 'recoverable') {
     requireInvariant(cp.latestOutcome?.kind === 'failure', 'recoverable without failure outcome')
   }
+  if (cp.haltReason === 'cap-exhausted') {
+    // Structural evidence only: the snapshot does not record a dynamic router's chosen target.
+    const targets = cp.latestOutcome?.kind === 'failure'
+      ? [recoveryTargetFor(cp.graph, cp.latestOutcome.failure.code)]
+      : completed
+        ? cp.graph.nodes.find(node => node.nodeId === completed.nodeId)?.targets ?? []
+        : [cp.graph.entry]
+    requireInvariant(cp.graph.nodes.some(node => (
+      targets.includes(node.nodeId) && !failedNodeSet.has(node.nodeId) && counts.get(node.nodeId) === node.budget
+    )), 'cap halt requires an exhausted eligible target')
+  }
   if (cp.haltReason === 'interrupted') {
     requireInvariant(cp.pending !== null, 'interrupted halt requires reservation')
-  }
-  if (cp.haltReason === 'failed') {
-    requireInvariant(cp.pending === null, 'fatal failed halt with pending')
-    // Fatal failed may have null latestOutcome (unexpected throw) or failure outcome.
-    if (cp.latestOutcome?.kind === 'failure') {
-      requireInvariant(cp.expectedFailureSeq >= 1, 'fatal domain failure seq')
-    } else {
-      requireInvariant(cp.expectedFailureSeq === 0 && cp.latestOutcome === null, 'fatal throw shape')
-    }
   }
 
   let latestOutcome: ExecutionSnapshotV2['latestOutcome'] = null

@@ -54,6 +54,8 @@ export function createResumableNodeRunV2(
       if (snapshot.status === 'halted') throw new Error('run is halted; automatic retry is not supported')
       if (snapshot.status === 'terminal') return snapshot.lastGood.state
       active = true
+      let reserved = false
+      let preBodyReason: 'control' | 'cap-exhausted' = 'control'
       try {
         let target: string | null
         if (snapshot.status === 'recoverable') {
@@ -88,7 +90,11 @@ export function createResumableNodeRunV2(
         const body = nodes.get(target)
         if (!definition || !body) throw new TypeError(`undeclared node "${target}"`)
         const count = snapshot.visits.find(visit => visit.nodeId === target)?.count ?? 0
-        if (count >= definition.budget) throw new VisitCapError(target, definition.budget, count)
+        if (count >= definition.budget) {
+          // Classify by execution stage, not error class: a router can throw VisitCapError too.
+          preBodyReason = 'cap-exhausted'
+          throw new VisitCapError(target, definition.budget, count)
+        }
         if (!Number.isSafeInteger(snapshot.revision + 2)) throw new RangeError('snapshot revision exhausted')
 
         const attempt = snapshot.visits.reduce((total, visit) => total + visit.count, 0) + 1
@@ -102,6 +108,7 @@ export function createResumableNodeRunV2(
             visit.nodeId === target ? { ...visit, count: count + 1 } : visit
           )),
         }, expected)
+        reserved = true
 
         try {
           const raw = body(snapshot.lastGood.state)
@@ -156,6 +163,14 @@ export function createResumableNodeRunV2(
           }, expected)
           throw error
         }
+      } catch (error) {
+        if (!reserved) {
+          // No new invocation occurred. Revision counts reservations/settlements, not status writes.
+          snapshot = parseExecutionSnapshotV2({
+            ...snapshot, status: 'halted', haltReason: preBodyReason,
+          }, expected)
+        }
+        throw error
       } finally {
         active = false
       }
