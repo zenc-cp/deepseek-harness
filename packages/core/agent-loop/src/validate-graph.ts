@@ -23,7 +23,25 @@ export function validateGraph(spec: GraphSpec): GraphValidationError[] {
   const errors: GraphValidationError[] = []
   const nodeSet = new Set(spec.nodes)
 
-  // 1. All router targets must exist
+  const edges = new Map(Object.entries(spec.routers))
+  const caps = new Set(spec.visitCaps)
+  if (!spec.entry || (!nodeSet.has(spec.entry) && !edges.has(spec.entry))) {
+    errors.push(new GraphValidationError(`Unknown entry "${spec.entry}"`))
+  }
+  if (nodeSet.size !== spec.nodes.length || spec.nodes.some(node => !node)) {
+    errors.push(new GraphValidationError('Node identifiers must be nonempty and unique'))
+  }
+  if (caps.size !== spec.visitCaps.length) {
+    errors.push(new GraphValidationError('Visit cap identifiers must be unique'))
+  }
+  for (const cap of caps) {
+    if (!nodeSet.has(cap)) errors.push(new GraphValidationError(`Visit cap targets unknown node "${cap}"`))
+  }
+  for (const router of edges.keys()) {
+    if (!router) errors.push(new GraphValidationError('Router identifiers must be nonempty'))
+  }
+
+  // All router targets must exist
   for (const [routerName, targets] of Object.entries(spec.routers)) {
     for (const target of targets) {
       if (!nodeSet.has(target)) {
@@ -34,48 +52,39 @@ export function validateGraph(spec: GraphSpec): GraphValidationError[] {
     }
   }
 
-  // 2. Nodes that appear in cycles should have visit caps (simple check)
-  const hasCycle = detectSimpleCycle(spec)
-  if (hasCycle && spec.visitCaps.length === 0) {
-    errors.push(new GraphValidationError(
-      'Graph contains a cycle but no visit caps are declared',
-    ))
+  // A node is cyclic exactly when a nonempty path returns to that node.
+  // Iterative traversal avoids recursive-stack limits. O(V * (V + E)).
+  for (const node of nodeSet) {
+    if (!caps.has(node) && walk(edges, edges.get(node) ?? []).has(node)) {
+      errors.push(new GraphValidationError(`Cyclic node "${node}" requires a visit cap`))
+    }
   }
 
-  // 3. All nodes should be reachable from entry (basic reachability)
-  const reachable = computeReachable(spec)
+  // Check both executable nodes and separately declared router entry points.
+  const reachable = walk(edges, [spec.entry])
   for (const node of spec.nodes) {
     if (!reachable.has(node)) {
       errors.push(new GraphValidationError(`Node "${node}" is unreachable from entry "${spec.entry}"`))
     }
   }
 
+  for (const router of edges.keys()) {
+    if (!nodeSet.has(router) && !reachable.has(router)) {
+      errors.push(new GraphValidationError(`Router "${router}" is unreachable from entry "${spec.entry}"`))
+    }
+  }
   return errors
 }
 
-function detectSimpleCycle(spec: GraphSpec): boolean {
-  for (const targets of Object.values(spec.routers)) {
-    for (const t of targets) {
-      // very naive: if any router can point back, treat as possible cycle
-      if (spec.routers[t]) {
-        return true
-      }
-    }
-  }
-  return false
-}
-
-function computeReachable(spec: GraphSpec): Set<string> {
+function walk(edges: ReadonlyMap<string, readonly string[]>, starts: readonly string[]): Set<string> {
   const reachable = new Set<string>()
-  const queue: string[] = [spec.entry]
-  while (queue.length > 0) {
-    const current = queue.shift()
-    if (current === undefined) break
-    if (reachable.has(current)) continue
+  const queue = [...starts]
+  for (let index = 0; index < queue.length; index++) {
+    const current = queue[index]
+    if (current === undefined || reachable.has(current)) continue
     reachable.add(current)
-    const targets = spec.routers[current] ?? []
-    for (const t of targets) {
-      if (!reachable.has(t)) queue.push(t)
+    for (const target of edges.get(current) ?? []) {
+      if (!reachable.has(target)) queue.push(target)
     }
   }
   return reachable

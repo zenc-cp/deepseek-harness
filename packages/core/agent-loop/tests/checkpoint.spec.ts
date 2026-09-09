@@ -13,6 +13,25 @@ const sampleState = createGraphState({
 })
 
 describe('checkpoint', () => {
+  it.each([
+    { state: null }, { state: {} }, { state: { ...sampleState, version: 99 } },
+    { nodeId: '' }, { seq: -1 }, { seq: 1.5 }, { seq: NaN }, { seq: Infinity },
+    { seq: Number.MAX_SAFE_INTEGER + 1 }, { timestamp: -1 }, { timestamp: NaN },
+    { timestamp: Infinity }, { extra: true },
+  ])('rejects malformed checkpoint %j', (patch) => {
+    expect(isValidCheckpoint({ ...createCheckpoint(sampleState, 'node', 0), ...patch })).toBe(false)
+  })
+
+  it('validates creation and detaches the nested state', () => {
+    expect(() => createCheckpoint(sampleState, '', 0)).toThrow()
+    expect(() => createCheckpoint(sampleState, 'node', -1)).toThrow()
+    const mutable = structuredClone(sampleState)
+    const cp = createCheckpoint(mutable, 'node', 0)
+    mutable.inbox.nextTurnCount = 99
+    expect(cp.state.inbox.nextTurnCount).toBe(0)
+    expect(Object.isFrozen(cp.state.inbox)).toBe(true)
+  })
+
   it('creates a frozen checkpoint with correct version and metadata', () => {
     const cp = createCheckpoint(sampleState, 'enterRunning', 5)
     expect(cp.version).toBe(CHECKPOINT_VERSION)
